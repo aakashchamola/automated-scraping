@@ -1,0 +1,10 @@
+{
+    "output_file": "jobs.csv",
+    "keywords_file": "keywords.txt",
+    "request": {
+        "timeout": 10,
+        "max_retries": 3,
+        "retry_delay": 2
+    },
+    "platforms": ["indeed"]
+}
