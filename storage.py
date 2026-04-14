@@ -5,6 +5,22 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+REQUIRED_COLUMNS = ["Company", "Role", "Location", "Platform", "Job Link"]
+OPTIONAL_COLUMNS = ["Keyword"]
+OUTPUT_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
+
+
+def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
+    prepared = df.copy()
+    for col in OUTPUT_COLUMNS:
+        if col not in prepared.columns:
+            prepared[col] = ""
+
+    for col in OUTPUT_COLUMNS:
+        prepared[col] = prepared[col].fillna("").astype(str).str.strip()
+
+    return prepared[OUTPUT_COLUMNS]
+
 
 def load_existing(filepath: str) -> pd.DataFrame:
     """Load existing jobs CSV if present; return empty DataFrame otherwise."""
@@ -25,33 +41,40 @@ def deduplicate(new_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.DataFrame
     Deduplication key: 'Job Link' (platform-unique URL).
     Falls back to ('Company', 'Role') if Job Link is missing.
     """
-    if existing_df.empty:
-        dedup_key = "Job Link" if "Job Link" in new_df.columns else ["Company", "Role"]
-        before = len(new_df)
-        result = new_df.drop_duplicates(subset=dedup_key, keep="first")
-        logger.info(
-            f"Deduplication (within run): {before - len(result)} duplicates removed"
-        )
-        return result
+    existing_prepared = _prepare_df(existing_df) if not existing_df.empty else pd.DataFrame(columns=OUTPUT_COLUMNS)
+    new_prepared = _prepare_df(new_df)
 
-    combined = pd.concat([existing_df, new_df], ignore_index=True)
+    combined = pd.concat([existing_prepared, new_prepared], ignore_index=True)
     before = len(combined)
-    dedup_key = "Job Link" if "Job Link" in combined.columns else ["Company", "Role"]
-    combined.drop_duplicates(subset=dedup_key, keep="first", inplace=True)
-    after = len(combined)
+
+    with_link = combined[combined["Job Link"] != ""].copy()
+    without_link = combined[combined["Job Link"] == ""].copy()
+
+    with_link = with_link.drop_duplicates(
+        subset=["Platform", "Job Link"],
+        keep="last",
+    )
+    without_link = without_link.drop_duplicates(
+        subset=["Platform", "Company", "Role"],
+        keep="last",
+    )
+
+    result = pd.concat([with_link, without_link], ignore_index=True)
+    after = len(result)
     new_count = after - len(existing_df)
     logger.info(
         f"Deduplication: {before - after} duplicates removed | "
         f"{new_count} new jobs added | {after} total records"
     )
-    return combined
+    return result[OUTPUT_COLUMNS]
 
 
 def save(df: pd.DataFrame, filepath: str) -> None:
     """Save DataFrame to CSV, creating parent directories as needed."""
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
     try:
-        df.to_csv(filepath, index=False, encoding="utf-8")
+        prepared = _prepare_df(df)
+        prepared.to_csv(filepath, index=False, encoding="utf-8")
         logger.info(f"Saved {len(df)} records to '{filepath}'")
     except Exception as exc:
         logger.error(f"Failed to save '{filepath}': {exc}")

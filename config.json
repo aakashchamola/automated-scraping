@@ -4,7 +4,15 @@
     "request": {
         "timeout": 10,
         "max_retries": 3,
-        "retry_delay": 2
+        "retry_delay": 1,
+        "delay_between_requests": 0
     },
-    "platforms": ["indeed"]
+    "platforms": ["indeed"],
+    "platform_settings": {
+        "indeed": {
+            "country": "us",
+            "location": "United States",
+            "max_pages": 1
+        }
+    }
 }

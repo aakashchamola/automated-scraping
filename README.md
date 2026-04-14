@@ -1,201 +1,153 @@
 # Automated Job Scraping Pipeline
 
-A modular, scalable Python pipeline that scrapes job listings from job platforms, deduplicates results across runs, and stores them to a persistent CSV file — designed to grow into a fully automated, agent-driven job hunting system.
+This project collects job listings in a clean, repeatable way.
+
+Right now it is built for **Phase 1**:
+1. Scrape jobs from **Indeed**
+2. Use a keyword list from file
+3. Save results to CSV
+4. Keep data clean by removing duplicates
+
+The long-term goal is to grow this into an **orchestrated automation pipeline**.
 
 ---
 
-## Table of Contents
+## Current Progress (April 2026)
 
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Setup](#setup)
-- [Configuration](#configuration)
-- [Keywords](#keywords)
-- [Running the Pipeline](#running-the-pipeline)
-- [Output](#output)
-- [Adding a New Platform](#adding-a-new-platform)
-- [Roadmap](#roadmap)
+What is done so far:
+1. Project refactored into clean modules (scraper, storage, logging, config)
+2. Indeed scraper is working with retry and error handling
+3. Country and location are configurable (currently set to US)
+4. Keywords are fully configurable from `keywords.txt`
+5. Output is generated in `jobs.csv` with fixed columns
+6. Deduplication is enabled so repeated runs do not keep adding the same jobs
+7. Run logs are saved to `logs/`
+
+Current output columns:
+1. Company
+2. Role
+3. Location
+4. Platform
+5. Job Link
+6. Keyword
 
 ---
 
-## Features
+## What We Are Building Next
 
-- **Modular architecture** — scraping, storage, and logging are fully separated
-- **Dynamic keywords** — read from `keywords.txt`; no code changes needed to update searches
-- **Retry mechanism** — automatically retries on HTTP 429, 500, 502, 503, 504 with exponential backoff
-- **Granular error handling** — catches timeout, connection errors, and HTTP errors independently
-- **Cross-run deduplication** — merges new results with existing history; no duplicate jobs accumulate across runs
-- **Timestamped log files** — every run writes to `logs/scrape_YYYYMMDD_HHMMSS.log` alongside console output
-- **Platform registry** — add a new scraper in one file with one import; zero changes to pipeline logic
-- **Config-driven** — timeouts, retries, output paths, and active platforms all controlled via `config.json`
+Near-term direction:
+1. Add more platforms (LinkedIn, Glassdoor, etc.)
+2. Improve filtering and relevance
+3. Add scheduled runs (daily/weekly)
+4. Add orchestrator layer to manage multi-step automation
+
+Final direction:
+1. Scrape -> clean -> enrich -> orchestrate actions from one pipeline
 
 ---
 
 ## Project Structure
 
 ```
-automation/
-├── main.py              # Pipeline entry point & platform registry
-├── config.json          # All runtime settings
-├── keywords.txt         # One search keyword per line
-├── logger_setup.py      # Console + rotating file logging setup
-├── storage.py           # Load / deduplicate / save CSV logic
-├── .gitignore
+automated-scraping/
+├── main.py
+├── config.json
+├── keywords.txt
+├── logger_setup.py
+├── storage.py
+├── requirements.txt
+├── jobs.csv                  # created after running
+├── logs/                     # created after running
 └── scrapers/
-    ├── __init__.py      # BaseScraper abstract base class
-    └── indeed.py        # Indeed scraper implementation
+    ├── __init__.py
+    └── indeed.py
 ```
 
 ---
 
-## Setup
+## Quick Setup
 
-### Requirements
-
-- Python 3.9+
-- pip packages:
+Run these commands from the project folder:
 
 ```bash
-pip install requests beautifulsoup4 pandas urllib3
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python main.py
 ```
 
-### Clone
-
-```bash
-git clone https://github.com/aakashchamola/automated-scraping.git
-cd automated-scraping
-```
+If you are on macOS with Homebrew Python, always use this `.venv` flow.
 
 ---
 
-## Configuration
+## Basic Configuration
 
-Edit `config.json` to control pipeline behaviour:
+Edit `config.json`:
 
 ```json
 {
-    "output_file": "jobs.csv",
-    "keywords_file": "keywords.txt",
-    "request": {
-        "timeout": 10,
-        "max_retries": 3,
-        "retry_delay": 2
-    },
-    "platforms": ["indeed"]
+  "output_file": "jobs.csv",
+  "keywords_file": "keywords.txt",
+  "request": {
+    "timeout": 10,
+    "max_retries": 3,
+    "retry_delay": 1,
+    "delay_between_requests": 0
+  },
+  "platforms": ["indeed"],
+  "platform_settings": {
+    "indeed": {
+      "country": "us",
+      "location": "United States",
+      "max_pages": 1
+    }
+  }
 }
 ```
 
-| Key | Description |
-|---|---|
-| `output_file` | CSV file where results are saved and history is maintained |
-| `keywords_file` | Path to the keywords file |
-| `request.timeout` | Per-request timeout in seconds |
-| `request.max_retries` | Number of retry attempts on transient failures |
-| `request.retry_delay` | Backoff multiplier in seconds between retries |
-| `platforms` | List of active platforms to scrape (must match registry in `main.py`) |
+What to edit most often:
+1. `keywords.txt` for search terms
+2. `platform_settings.indeed.country` for market (`us`, `in`, `uk`, `ca`, `au`)
+3. `platform_settings.indeed.location` for region/city/state
+4. `output_file` if you want a different CSV name
 
 ---
 
-## Keywords
-
-Add or remove search terms in `keywords.txt` — one per line:
-
-```
-Microbiologist
-Molecular Biologist
-Research Associate Biology
-Clinical Research Associate
-Bioinformatics Analyst
-```
-
-No code changes needed. The pipeline reads this file fresh on every run.
-
----
-
-## Running the Pipeline
+## How to Run (Day-to-Day)
 
 ```bash
-# Default — uses config.json
+source .venv/bin/activate
 python main.py
-
-# Custom config file
-python main.py --config my_config.json
 ```
 
-### What happens each run
-
-1. Keywords are loaded from `keywords.txt`
-2. Each active platform scrapes all keywords
-3. New results are merged with existing `jobs.csv` history
-4. Duplicates are removed (keyed on `Job Link`)
-5. Final deduplicated dataset is saved back to `jobs.csv`
-6. A timestamped log is written to `logs/`
+After run:
+1. Check `jobs.csv` for job data
+2. Check `logs/` for run logs
 
 ---
 
-## Output
+## Notes for Refactor + Orchestrator Goal
 
-`jobs.csv` — cumulative, deduplicated job records:
+This codebase is intentionally kept simple in Phase 1.
 
-| Company | Role | Location | Platform | Keyword | Job Link |
-|---|---|---|---|---|---|
-| Example Labs | Microbiologist | Bangalore | Indeed | Microbiologist | https://in.indeed.com/... |
+The current refactor already supports easy growth:
+1. New scrapers can be added under `scrapers/`
+2. Main pipeline logic remains mostly unchanged
+3. Storage stays consistent as platforms expand
 
-Logs are written to `logs/scrape_YYYYMMDD_HHMMSS.log` and also printed to console.
-
----
-
-## Adding a New Platform
-
-**Step 1** — Create `scrapers/<platform>.py`:
-
-```python
-from scrapers import BaseScraper
-
-class LinkedInScraper(BaseScraper):
-    def fetch_jobs(self, keyword: str) -> list:
-        # your scraping logic here
-        return [
-            {
-                "Company": "...",
-                "Role": "...",
-                "Location": "...",
-                "Platform": "LinkedIn",
-                "Keyword": keyword,
-                "Job Link": "...",
-            }
-        ]
-```
-
-**Step 2** — Register it in `main.py`:
-
-```python
-from scrapers.linkedin import LinkedInScraper
-
-SCRAPERS = {
-    "indeed": IndeedScraper,
-    "linkedin": LinkedInScraper,   # add this
-}
-```
-
-**Step 3** — Enable it in `config.json`:
-
-```json
-"platforms": ["indeed", "linkedin"]
-```
-
-That's it. No other changes needed.
+When we add the orchestrator, it will sit on top of this pipeline and coordinate steps like:
+1. Run platform scrapers
+2. Merge and dedupe output
+3. Trigger enrichment/filtering
+4. Trigger follow-up actions
 
 ---
 
 ## Roadmap
 
-- [ ] LinkedIn scraper
-- [ ] Naukri.com scraper
-- [ ] Company-based job expansion (scrape careers pages directly)
-- [ ] Employee scraping for network mapping
-- [ ] Filtering logic (salary range, experience level, location)
-- [ ] Excel/Google Sheets export
-- [ ] Scheduling via cron / Task Scheduler
-- [ ] Agent-based automation layer (auto-apply, outreach drafting)
-- [ ] Dashboard / notification on new matching jobs
+- [x] Phase 1 base pipeline (Indeed + CSV + dedupe + logs)
+- [x] Configurable country/location for Indeed
+- [ ] Add 1 more platform
+- [ ] Introduce scheduling
+- [ ] Add relevance filtering
+- [ ] Integrate orchestrator layer

@@ -1,28 +1,8 @@
 Microbiologist
-Molecular Biologist
-Cell Biologist
-Research Associate Biology
-Research Scientist Biology
-Laboratory Technician
-Lab Assistant Biology
-Research Assistant Microbiology
-Scientist I Biology
-Scientist II Biology
-Drug Development Associate
-Pharmaceutical Scientist
+Research Assistant Biology
+Research Associate Biotech
 Clinical Research Associate
-Clinical Trials Coordinator
-Clinical Data Associate
-Pharmacology Researcher
-Translational Research Scientist
-Preclinical Research Associate
-Drug Safety Associate
-Regulatory Affairs Associate
-Genomics Researcher
+Drug Development Associate
 Bioinformatics Analyst
-Computational Biologist
-Systems Biology Researcher
-Functional Genomics Scientist
-Molecular Genetics Researcher
-Cancer Biology Researcher
-Immunology Researcher
+Lab Technician Biology
+Biotech Intern
