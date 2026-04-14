@@ -19,13 +19,30 @@ import sys
 import pandas as pd
 
 import storage
+from scrapers.glassdoor import GlassdoorScraper
+from scrapers.internshala import InternshalaScraper
+from scrapers.lever import LeverScraper
+from scrapers.linkedin import LinkedInScraper
 from logger_setup import setup_logging
 from scrapers.indeed import IndeedScraper
+from scrapers.simplyhired import SimplyHiredScraper
+from scrapers.wellfound import WellfoundScraper
+from scrapers.ycombinator import YCombinatorScraper
 
 # ── Platform registry ────────────────────────────────────────────────────────
 # Add new scrapers here: "platform_name": ScraperClass
 SCRAPERS = {
     "indeed": IndeedScraper,
+    "linkedin": LinkedInScraper,
+    "glassdoor": GlassdoorScraper,
+    "jobs.lever": LeverScraper,
+    "lever": LeverScraper,
+    "internshala": InternshalaScraper,
+    "internshaala": InternshalaScraper,
+    "wellfound": WellfoundScraper,
+    "angellist": WellfoundScraper,
+    "ycombinator": YCombinatorScraper,
+    "simplyhired": SimplyHiredScraper,
 }
 
 setup_logging()

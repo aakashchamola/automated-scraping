@@ -3,7 +3,7 @@
 This project collects job listings in a clean, repeatable way.
 
 Right now it is built for **Phase 1**:
-1. Scrape jobs from **Indeed**
+1. Scrape jobs from multiple platforms
 2. Use a keyword list from file
 3. Save results to CSV
 4. Keep data clean by removing duplicates
@@ -16,12 +16,17 @@ The long-term goal is to grow this into an **orchestrated automation pipeline**.
 
 What is done so far:
 1. Project refactored into clean modules (scraper, storage, logging, config)
-2. Indeed scraper is working with retry and error handling
+2. Multi-platform scraping layer is added (LinkedIn, Indeed, Glassdoor, jobs.lever, Internshala, Wellfound, Y Combinator, SimplyHired)
 3. Country and location are configurable (currently set to US)
 4. Keywords are fully configurable from `keywords.txt`
 5. Output is generated in `jobs.csv` with fixed columns
 6. Deduplication is enabled so repeated runs do not keep adding the same jobs
 7. Run logs are saved to `logs/`
+
+Platform status right now:
+1. Working well in current tests: LinkedIn, Indeed (can be rate-limited), Internshala, SimplyHired
+2. Available but may return low/zero due site protections: Glassdoor, Wellfound, Y Combinator
+3. Lever is supported through company-specific site slugs in config (`platform_settings.lever.sites`)
 
 Current output columns:
 1. Company
@@ -60,7 +65,15 @@ automated-scraping/
 ├── logs/                     # created after running
 └── scrapers/
     ├── __init__.py
-    └── indeed.py
+    ├── glassdoor.py
+    ├── indeed.py
+    ├── internshala.py
+    ├── lever.py
+    ├── linkedin.py
+    ├── simplyhired.py
+    ├── wellfound.py
+    └── ycombinator.py
+  ├── smoke_test.py            # quick platform health check
 ```
 
 ---
@@ -100,6 +113,10 @@ Edit `config.json`:
       "country": "us",
       "location": "United States",
       "max_pages": 1
+    },
+    "lever": {
+      "location": "United States",
+      "sites": []
     }
   }
 }
@@ -110,6 +127,8 @@ What to edit most often:
 2. `platform_settings.indeed.country` for market (`us`, `in`, `uk`, `ca`, `au`)
 3. `platform_settings.indeed.location` for region/city/state
 4. `output_file` if you want a different CSV name
+5. `platforms` to choose which sources you want to run
+6. `platform_settings.lever.sites` to add Lever company site slugs
 
 ---
 
@@ -123,6 +142,13 @@ python main.py
 After run:
 1. Check `jobs.csv` for job data
 2. Check `logs/` for run logs
+
+Quick health test across platforms:
+
+```bash
+source .venv/bin/activate
+python smoke_test.py
+```
 
 ---
 
@@ -147,7 +173,7 @@ When we add the orchestrator, it will sit on top of this pipeline and coordinate
 
 - [x] Phase 1 base pipeline (Indeed + CSV + dedupe + logs)
 - [x] Configurable country/location for Indeed
-- [ ] Add 1 more platform
+- [x] Add multi-platform scraping layer
 - [ ] Introduce scheduling
 - [ ] Add relevance filtering
 - [ ] Integrate orchestrator layer
