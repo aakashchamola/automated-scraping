@@ -19,6 +19,7 @@ import sys
 import pandas as pd
 
 import storage
+from google_sheets_store import GoogleSheetsStore
 from scrapers.glassdoor import GlassdoorScraper
 from scrapers.internshala import InternshalaScraper
 from scrapers.lever import LeverScraper
@@ -81,6 +82,11 @@ def validate_config(config: dict) -> dict:
     request_cfg.setdefault("delay_between_requests", 0)
 
     config.setdefault("platform_settings", {})
+    gs_cfg = config.setdefault("google_sheets", {})
+    gs_cfg.setdefault("enabled", False)
+    gs_cfg.setdefault("credentials_file", "")
+    gs_cfg.setdefault("spreadsheet_id", "")
+    gs_cfg.setdefault("worksheet", "Jobs")
     return config
 
 
@@ -153,9 +159,33 @@ def run(config: dict) -> None:
         return
 
     new_df = pd.DataFrame(all_new_jobs)
-    existing_df = storage.load_existing(config["output_file"])
-    merged_df = storage.deduplicate(new_df, existing_df)
+
+    existing_csv_df = storage.load_existing(config["output_file"])
+
+    sheet_store = GoogleSheetsStore(config.get("google_sheets", {}))
+    existing_sheet_df = pd.DataFrame(columns=storage.OUTPUT_COLUMNS)
+    if sheet_store.is_enabled():
+        try:
+            existing_sheet_df = sheet_store.load_existing()
+        except Exception as exc:
+            logger.exception(f"Failed to read Google Sheets data: {exc!r}")
+            sys.exit(1)
+
+    existing_combined_df = pd.concat(
+        [existing_csv_df, existing_sheet_df],
+        ignore_index=True,
+    )
+
+    merged_df = storage.deduplicate(new_df, existing_combined_df)
     storage.save(merged_df, config["output_file"])
+
+    if sheet_store.is_enabled():
+        rows_to_append = storage.get_new_rows(new_df, existing_combined_df)
+        try:
+            sheet_store.append_rows(rows_to_append)
+        except Exception as exc:
+            logger.exception(f"Failed to append to Google Sheets: {exc!r}")
+            sys.exit(1)
 
     logger.info(
         f"Pipeline complete. Total records: {len(merged_df)} "
