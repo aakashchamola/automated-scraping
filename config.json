@@ -58,6 +58,7 @@
         "enabled": true,
         "credentials_file": "secrets/google-service-account.json",
         "spreadsheet_id": "1SEIHZXpHu6dnjEJ3MHTdljOPhOnLY-2eRzi5vXIYrmA",
-        "worksheet": "Jobs"
+        "worksheet": "Jobs",
+        "companies_worksheet": "CompaniesT"
     }
 }

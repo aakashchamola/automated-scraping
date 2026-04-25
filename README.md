@@ -1,8 +1,41 @@
 # Automated Job Scraping Pipeline — Technical Reference
 
-A modular, config-driven Python pipeline that scrapes job listings from multiple platforms, deduplicates results, writes to CSV, and optionally syncs live to Google Sheets.
+A modular, config-driven Python pipeline that scrapes job listings from multiple platforms, deduplicates results, writes to CSV, and optionally syncs live to Google Sheets. A second standalone automation enriches company-level data (employee count, career page, LinkedIn URL) into a dedicated Google Sheet tab.
 
 > For step-by-step setup instructions after cloning, see [SETUP.md](SETUP.md).
+
+---
+
+## Project Structure
+
+```
+automated-scraping/
+├── main.py                   # Job scraping pipeline entry point
+├── company_enricher.py       # Standalone company enrichment automation
+├── google_sheets_store.py    # Google Sheets sink/source for jobs pipeline
+├── storage.py                # Schema normalisation, dedup, CSV persistence
+├── logger_setup.py           # Shared logging setup (file + stdout)
+├── config.json               # Runtime configuration for all scripts
+├── keywords.txt              # One keyword per line for job searches
+├── requirements.txt          # Python dependencies
+│
+├── scrapers/                 # Platform-specific job scrapers
+│   ├── __init__.py           # BaseScraper abstract class
+│   ├── indeed.py
+│   ├── linkedin.py
+│   └── ...                   # glassdoor, lever, wellfound, etc.
+│
+├── secrets/                  # Credentials (gitignored)
+│   └── google-service-account.json
+│
+├── csv/                      # CSV data output directory
+│   └── jobs.csv
+│
+├── logs/                     # All log files (gitignored)
+│   └── scrape_YYYYMMDD_HHMMSS.log
+│
+└── tests/                    # Ad-hoc test and debug scripts
+```
 
 ---
 
@@ -64,6 +97,44 @@ SCRAPERS = {
 ```
 
 **Error isolation**: scraper init and per-keyword fetch are each wrapped in try/except so one failing platform or keyword does not abort the whole run.
+
+---
+
+### `company_enricher.py` — Company Enrichment Automation
+
+A fully standalone script (independent of `main.py`) that reads the **Companies** tab of your Google Sheet and fills in company-level data.
+
+**Sheet columns populated:**
+
+| Column | Header | Content |
+|--------|--------|---------|
+| A | Company | Company name (set by sync from Jobs tab) |
+| B | Employee-Count | Headcount scraped from LinkedIn |
+| C | Career-Page | Company careers URL |
+| D | LinkedIn-URL | Discovered LinkedIn company page URL |
+
+**Processing rules:**
+- Row 1 is always the header row; data starts at row 2.
+- A row is skipped if column B or C already has any value (including `NA`).
+- A row is skipped if column D is `NA` (LinkedIn lookup was already attempted and failed).
+- When a value cannot be found, `NA` is written to that cell and the cell background is colored **red** — so you can see at a glance what needs manual attention.
+- Idempotent: safe to run multiple times; already-filled cells are never overwritten.
+
+**Tasks performed on each run:**
+1. **Task 3 — Sync:** Pulls unique company names from the Jobs tab into the Companies tab (no duplicates added).
+2. **Task 1 — Employee count:** Probes the LinkedIn company page and extracts headcount from the page's structured data.
+3. **Task 2 — Career page:** Extracts the company website from LinkedIn structured data, then probes common career paths (`/careers`, `careers.{domain}`, etc.).
+
+**LinkedIn URL discovery:** Generates likely URL slugs from the company name and probes `linkedin.com/company/{slug}/` directly. No third-party search engine required.
+
+**Usage:**
+```bash
+python company_enricher.py
+python company_enricher.py --config config.json --companies-sheet "Companies"
+
+# Run in background and log output
+nohup python company_enricher.py > logs/enrichment_run.log 2>&1 &
+```
 
 ---
 
@@ -219,7 +290,8 @@ Full schema with all supported keys:
     "enabled": false,
     "credentials_file": "secrets/google-service-account.json",
     "spreadsheet_id": "",
-    "worksheet": "Jobs"
+    "worksheet": "Jobs",
+    "companies_worksheet": "Companies"
   }
 }
 ```
@@ -239,7 +311,8 @@ Full schema with all supported keys:
 | `google_sheets.enabled` | Toggle Sheets integration |
 | `google_sheets.credentials_file` | Path to service account JSON |
 | `google_sheets.spreadsheet_id` | ID from the Google Sheet URL |
-| `google_sheets.worksheet` | Tab name inside the spreadsheet |
+| `google_sheets.worksheet` | Jobs tab name inside the spreadsheet |
+| `google_sheets.companies_worksheet` | Companies tab name for the enrichment automation |
 
 ---
 
@@ -290,14 +363,18 @@ keywords.txt    config.json
 ## Running
 
 ```bash
-# Standard run
+# Job scraping pipeline
 python main.py
-
-# Custom config
 python main.py --config config.json
 
+# Company enrichment (separate automation)
+python company_enricher.py
+
+# Run enrichment in background with log
+nohup python company_enricher.py > logs/enrichment_run.log 2>&1 &
+
 # Quick platform health check (one keyword, all platforms)
-python smoke_test.py
+python tests/smoke_test.py
 ```
 
 ---
@@ -308,6 +385,8 @@ python smoke_test.py
 - [x] Configurable country/location
 - [x] Multi-platform scraping layer (8 platforms)
 - [x] Google Sheets live sync (dedupe-safe append)
+- [x] Company enrichment automation (employee count, career page, LinkedIn URL)
+- [x] NA sentinel + red cell highlighting for unresolvable companies
 - [ ] Scheduled runs (cron / GitHub Actions)
 - [ ] Relevance filtering / scoring
 - [ ] Enrichment layer (company info, salary estimates)
