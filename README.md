@@ -127,6 +127,8 @@ A fully standalone script (independent of `main.py`) that reads the **Companies*
 
 **LinkedIn URL discovery:** Generates likely URL slugs from the company name and probes `linkedin.com/company/{slug}/` directly. No third-party search engine required.
 
+**Resilience:** All Google Sheets write operations (`update`, `format`) are wrapped with automatic retry — up to 4 attempts with exponential backoff (8 s, 16 s, 32 s, 64 s) on transient network errors (`ConnectionResetError`, timeouts) and API rate-limit responses (HTTP 429/5xx). The script will not crash on a single dropped connection.
+
 **Usage:**
 ```bash
 python company_enricher.py

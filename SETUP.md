@@ -126,7 +126,7 @@ python main.py --config config.json
 Run a one-keyword test across all platforms to see which are currently returning results:
 
 ```bash
-python smoke_test.py
+python tests/smoke_test.py
 ```
 
 ---
@@ -202,7 +202,8 @@ mv ~/Downloads/your-project-*.json secrets/google-service-account.json
   "enabled": true,
   "credentials_file": "secrets/google-service-account.json",
   "spreadsheet_id": "YOUR_SHEET_ID",
-  "worksheet": "Jobs"
+  "worksheet": "Jobs",
+  "companies_worksheet": "Companies"
 }
 ```
 
@@ -223,6 +224,31 @@ python main.py
 ```
 
 On the first run, the header row is written automatically. Each subsequent run appends only new rows — nothing is ever duplicated.
+
+---
+
+## Step 10: Run Company Enrichment (Optional)
+
+After the job scraping pipeline has populated the **Jobs** tab, the enrichment script fills a separate **Companies** tab with employee headcount, career page URL, and LinkedIn URL for each unique employer.
+
+```bash
+# Foreground (output in terminal)
+python company_enricher.py
+
+# Background (safe to close terminal; tails into log file)
+nohup .venv/bin/python company_enricher.py > logs/enrichment_run.log 2>&1 &
+
+# Follow the log
+tail -f logs/enrichment_run.log
+```
+
+**What it does on each run:**
+1. Syncs any new company names from the Jobs tab into the Companies tab.
+2. For each unenriched row, discovers the LinkedIn company URL, then scrapes employee count and career page.
+3. Writes `NA` (with a red cell background) when a value cannot be found — those rows are skipped on future runs.
+4. The script is fully idempotent and resumes where it left off; transient network errors are automatically retried (up to 4 attempts with exponential backoff).
+
+> The Companies tab must already exist in your spreadsheet, or `companies_worksheet` in `config.json` must be set to a name that will be auto-created.
 
 ---
 
@@ -264,12 +290,19 @@ cd automated-scraping
 # Edit keywords if needed
 nano keywords.txt
 
-# Run
+# Run job scraping
 python main.py
+
+# Run enrichment (foreground)
+python company_enricher.py
+
+# Or run enrichment in background
+nohup .venv/bin/python company_enricher.py > logs/enrichment_run.log 2>&1 &
 
 # Check output
 open jobs.csv          # macOS: opens in default app
-cat logs/run_*.log     # view latest log
+cat logs/run_*.log     # view latest scraping log
+tail -f logs/enrichment_run.log  # follow enrichment log
 ```
 
 ---
@@ -283,3 +316,5 @@ cat logs/run_*.log     # view latest log
 | `403` from Google Sheets | Sheet not shared with service account | Follow Step 9e |
 | Platform returns 0 results | Anti-bot protection or markup changed | Try again later or reduce platforms |
 | `python` still points to system | venv not activated | Run `source .venv/bin/activate` or set up auto-activate hook |
+| Enrichment crashes mid-run | Transient network error | Retry is automatic (4 attempts); just re-run if it still fails |
+| Enrichment writes empty cells | LinkedIn rate-limiting (HTTP 999) | Wait a few minutes and re-run; already-filled rows are skipped |
