@@ -59,6 +59,21 @@
         "credentials_file": "secrets/google-service-account.json",
         "spreadsheet_id": "1SEIHZXpHu6dnjEJ3MHTdljOPhOnLY-2eRzi5vXIYrmA",
         "worksheet": "Jobs",
-        "companies_worksheet": "CompaniesT"
+        "company_source_worksheet": "Company",
+        "company_source_header": "Company",
+        "companies_worksheet": "CompaniesTest",
+        "enrichment_controls": {
+            "retry_na_fields": true,
+            "retry_invalid_career_values": [
+                "://",
+                ""
+            ]
+        },
+        "companies_columns": {
+            "company": "Company",
+            "employee_count": "Employee Count",
+            "career_page": "Career Page",
+            "linkedin_url": "LinkedIn URL"
+        }
     }
 }
