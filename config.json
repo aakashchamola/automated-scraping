@@ -61,6 +61,18 @@
         "worksheet": "Jobs",
         "company_source_worksheet": "Company",
         "company_source_header": "Company",
+        "source_sheet": {
+            "enabled": false,
+            "worksheet": "Company",
+            "company_header": "Company",
+            "career_page_header": "Career-Page",
+            "use_for_company_sync": true,
+            "use_for_linkedin_fallback": true,
+            "use_for_career_fallback": true
+        },
+        "validation": {
+            "enabled": true
+        },
         "companies_worksheet": "CompaniesTest",
         "enrichment_controls": {
             "retry_na_fields": true,
