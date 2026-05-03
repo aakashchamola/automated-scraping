@@ -62,16 +62,19 @@
         "company_source_worksheet": "Company",
         "company_source_header": "Company",
         "source_sheet": {
-            "enabled": false,
+            "enabled": true,
             "worksheet": "Company",
             "company_header": "Company",
+            "employee_count_header": "Employee-Count",
             "career_page_header": "Career-Page",
+            "linkedin_url_header": "Linkedin-Url",
             "use_for_company_sync": true,
             "use_for_linkedin_fallback": true,
             "use_for_career_fallback": true
         },
         "validation": {
-            "enabled": true
+            "enabled": false,
+            "retry_na_fields": false
         },
         "companies_worksheet": "CompaniesTest",
         "enrichment_controls": {

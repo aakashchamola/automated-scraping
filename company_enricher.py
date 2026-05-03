@@ -24,7 +24,6 @@ import re
 import sys
 import time
 from urllib.parse import urlparse
-
 import requests
 from bs4 import BeautifulSoup
 
@@ -83,7 +82,6 @@ _CAREER_SUBDOMAINS = ["careers", "jobs", "work"]
 
 # Delay between LinkedIn requests (seconds) — keeps us under rate limits
 _LINKEDIN_DELAY = 4
-
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -229,10 +227,14 @@ def get_jobs_company_linkedin(
     spreadsheet_id: str,
     sheet_name: str,
     company_header: str = "Company",
+    linkedin_header: str = "Linkedin-Url",
 ) -> dict:
     """
-    Read the configured company column from the source tab using the Sheets API v4,
-    returning a dict mapping company_name -> linkedin_url ("" when no hyperlink).
+    Read source company -> LinkedIn URL mapping.
+
+    Preferred path: value in configured linkedin_header column.
+    Fallback path: hyperlink attached to configured company_header cells.
+
     Only the first occurrence of each company name is kept.
     """
     # Find which column index holds the configured company header
@@ -252,14 +254,55 @@ def get_jobs_company_linkedin(
     header_row = header_resp.get("values", [[]])
     header_row = header_row[0] if header_row else []
     try:
-        col_idx = header_row.index(company_header)
+        company_col_idx = header_row.index(company_header)
     except ValueError:
         logger.warning(
             f"No '{company_header}' column found in '{sheet_name}' header"
         )
         return {}
 
-    col_letter = _col_index_to_letter(col_idx)
+    linkedin_col_idx = None
+    try:
+        linkedin_col_idx = header_row.index(linkedin_header)
+    except ValueError:
+        logger.debug(
+            f"No '{linkedin_header}' column in '{sheet_name}', falling back to company-cell hyperlinks"
+        )
+
+    if linkedin_col_idx is not None:
+        company_col_letter = _col_index_to_letter(company_col_idx)
+        linkedin_col_letter = _col_index_to_letter(linkedin_col_idx)
+        company_range = f"'{sheet_name}'!{company_col_letter}2:{company_col_letter}"
+        linkedin_range = f"'{sheet_name}'!{linkedin_col_letter}2:{linkedin_col_letter}"
+
+        try:
+            result = (
+                sheets_svc.spreadsheets()
+                .values()
+                .batchGet(
+                    spreadsheetId=spreadsheet_id,
+                    ranges=[company_range, linkedin_range],
+                )
+                .execute()
+            )
+        except HttpError as exc:
+            logger.error(f"Sheets API call failed reading source LinkedIn values: {exc}")
+            return {}
+
+        value_ranges = result.get("valueRanges", [])
+        company_values = value_ranges[0].get("values", []) if len(value_ranges) > 0 else []
+        linkedin_values = value_ranges[1].get("values", []) if len(value_ranges) > 1 else []
+
+        data = {}
+        for i, name_row in enumerate(company_values):
+            company_name = (name_row[0] if name_row else "").strip()
+            linkedin_row = linkedin_values[i] if i < len(linkedin_values) else []
+            linkedin_url = (linkedin_row[0] if linkedin_row else "").strip()
+            if company_name and company_name not in data:
+                data[company_name] = linkedin_url
+        return data
+
+    col_letter = _col_index_to_letter(company_col_idx)
     range_notation = f"'{sheet_name}'!{col_letter}2:{col_letter}"
 
     try:
@@ -374,6 +417,80 @@ def get_source_sheet_career_pages(
     return data
 
 
+def get_source_sheet_employee_counts(
+    sheets_svc,
+    spreadsheet_id: str,
+    sheet_name: str,
+    company_header: str = "Company",
+    employee_count_header: str = "Employee-Count",
+) -> dict:
+    """
+    Read company name -> employee count mapping from the source sheet.
+    Uses Sheets API v4 to capture cell values.
+    Only the first occurrence of each company name is kept.
+    """
+    from googleapiclient.errors import HttpError  # noqa: PLC0415
+
+    try:
+        header_resp = (
+            sheets_svc.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!1:1")
+            .execute()
+        )
+    except HttpError as exc:
+        logger.error(f"Could not read {sheet_name} header: {exc}")
+        return {}
+
+    header_row = header_resp.get("values", [[]])
+    header_row = header_row[0] if header_row else []
+
+    try:
+        company_col_idx = header_row.index(company_header)
+    except ValueError:
+        logger.warning(f"No '{company_header}' column in '{sheet_name}'")
+        return {}
+
+    try:
+        employee_col_idx = header_row.index(employee_count_header)
+    except ValueError:
+        logger.debug(f"No '{employee_count_header}' column in '{sheet_name}'")
+        return {}
+
+    company_col_letter = _col_index_to_letter(company_col_idx)
+    employee_col_letter = _col_index_to_letter(employee_col_idx)
+    company_range = f"'{sheet_name}'!{company_col_letter}2:{company_col_letter}"
+    employee_range = f"'{sheet_name}'!{employee_col_letter}2:{employee_col_letter}"
+
+    try:
+        result = (
+            sheets_svc.spreadsheets()
+            .values()
+            .batchGet(
+                spreadsheetId=spreadsheet_id,
+                ranges=[company_range, employee_range],
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        logger.error(f"Sheets API call failed reading employee counts: {exc}")
+        return {}
+
+    value_ranges = result.get("valueRanges", [])
+    company_values = value_ranges[0].get("values", []) if len(value_ranges) > 0 else []
+    employee_values = value_ranges[1].get("values", []) if len(value_ranges) > 1 else []
+
+    data = {}
+    for i, name_row in enumerate(company_values):
+        company_name = (name_row[0] if name_row else "").strip()
+        employee_row = employee_values[i] if i < len(employee_values) else []
+        employee_count = (employee_row[0] if employee_row else "").strip()
+        if company_name and company_name not in data and employee_count:
+            data[company_name] = employee_count
+
+    return data
+
+
 def _header_index_map(header_row: list) -> dict:
     """Case-insensitive header -> index mapping for row 1 values."""
     mapping = {}
@@ -448,7 +565,15 @@ def _enrichment_controls(gs_config: dict) -> dict:
 def _validation_controls(gs_config: dict) -> dict:
     """Validation pass controls for correcting stale/invalid existing sheet data."""
     cfg = gs_config.get("validation", {}) if isinstance(gs_config, dict) else {}
-    return {"enabled": bool(cfg.get("enabled", False))}
+    # Backward compatibility: check enrichment_controls if not in validation
+    retry_na = cfg.get("retry_na_fields")
+    if retry_na is None:
+        enrich_cfg = gs_config.get("enrichment_controls", {}) if isinstance(gs_config, dict) else {}
+        retry_na = enrich_cfg.get("retry_na_fields", False)
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "retry_na_fields": bool(retry_na),
+    }
 
 
 def _source_sheet_controls(gs_config: dict) -> dict:
@@ -457,7 +582,8 @@ def _source_sheet_controls(gs_config: dict) -> dict:
 
     New style:
       source_sheet: {
-        enabled, worksheet, company_header, career_page_header,
+                enabled, worksheet, company_header, employee_count_header,
+                career_page_header, linkedin_url_header,
         use_for_company_sync, use_for_linkedin_fallback, use_for_career_fallback
       }
     """
@@ -472,7 +598,9 @@ def _source_sheet_controls(gs_config: dict) -> dict:
             "company_header",
             gs_config.get("company_source_header", "Company"),
         ),
+        "employee_count_header": src.get("employee_count_header", "Employee-Count"),
         "career_page_header": src.get("career_page_header", "Career-Page"),
+        "linkedin_url_header": src.get("linkedin_url_header", "Linkedin-Url"),
         "use_for_company_sync": bool(src.get("use_for_company_sync", True)),
         "use_for_linkedin_fallback": bool(src.get("use_for_linkedin_fallback", True)),
         "use_for_career_fallback": bool(src.get("use_for_career_fallback", True)),
@@ -598,8 +726,30 @@ def _is_numeric_employee_count(value: str) -> bool:
     v = (value or "").strip()
     if not v:
         return False
-    # Accept both plain digits and comma-formatted counts (e.g., 79222 / 79,222).
-    return bool(re.fullmatch(r"(?:\d{1,3}(?:,\d{3})+|\d+)", v))
+    if _is_na(v):
+        return False
+    # Accept plain numbers, comma numbers, short suffixes, and ranges.
+    # Examples: 79222, 79,222, 500k, 1.2m, 500-600, 10k-15k
+    return bool(
+        re.fullmatch(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\+)?", v, re.IGNORECASE)
+        or re.fullmatch(r"\d+(?:\.\d+)?\s*[kmb](?:\+)?", v, re.IGNORECASE)
+        or re.fullmatch(
+            r"\d+(?:\.\d+)?(?:\s*[kmb])?\s*[-–]\s*\d+(?:\.\d+)?(?:\s*[kmb])?(?:\+)?",
+            v,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_source_employee_count(value: str) -> str:
+    """Normalize source employee count while allowing flexible non-integer formats."""
+    raw = (value or "").strip()
+    if not raw or _is_na(raw) or raw.upper() in {"N/A", "NONE", "NULL", "-"}:
+        return ""
+    if _is_numeric_employee_count(raw):
+        return raw
+    # Fallback: salvage a clean numeric value from verbose text.
+    return _normalize_employee_count(raw)
 
 
 def _ensure_required_headers(comp_ws, required_headers: dict) -> dict:
@@ -755,68 +905,92 @@ def scrape_employee_count(linkedin_url: str) -> str:
 
 def get_company_website(linkedin_url: str) -> str:
     """
-    Try to extract the company's own website URL from their LinkedIn /about page.
+    Try to extract the company's own website URL from LinkedIn company pages.
+
+    Probes both base profile and /about/ pages because some org profiles expose
+    external website data on one variant but not the other.
     """
     if not linkedin_url or "linkedin.com" not in linkedin_url:
         return ""
 
-    # Use the base company page (same reason as scrape_employee_count — /about redirects to login)
-    url = linkedin_url.rstrip("/") + "/"
+    normalized = _normalize_linkedin_url(linkedin_url)
+    if not normalized:
+        normalized = linkedin_url.rstrip("/") + "/"
 
-    try:
-        resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=12, allow_redirects=True)
-    except requests.RequestException:
+    def _extract_external_site(soup: BeautifulSoup) -> str:
+        # JSON-LD structured data only — anchor scanning picks up too many stray links.
+        for script in soup.find_all("script", {"type": "application/ld+json"}):
+            try:
+                data = json.loads(script.string or "")
+                # LinkedIn wraps company data in @graph; find the Organization node
+                nodes = data.get("@graph", []) if isinstance(data, dict) else []
+                if not nodes and isinstance(data, dict):
+                    nodes = [data]
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    # sameAs = the company's external website
+                    same_as = node.get("sameAs", "")
+                    if isinstance(same_as, list):
+                        # Prefer root domains over subdomains/deep paths
+                        candidates = [
+                            s
+                            for s in same_as
+                            if isinstance(s, str)
+                            and "linkedin.com" not in s
+                            and s.startswith("http")
+                        ]
+
+                        def _url_score(u: str) -> tuple:
+                            from urllib.parse import urlparse as _up2
+
+                            p = _up2(u)
+                            subdomain_depth = p.netloc.count(".") - 1
+                            path_depth = len([x for x in p.path.split("/") if x])
+                            return (subdomain_depth, path_depth)
+
+                        candidates.sort(key=_url_score)
+                        same_as = candidates[0] if candidates else ""
+                    if same_as and "linkedin.com" not in same_as:
+                        return same_as
+
+                    # Fallback: url field when it's not LinkedIn's own URL
+                    site = node.get("url", "")
+                    if site and "linkedin.com" not in site:
+                        return site
+            except (json.JSONDecodeError, AttributeError):
+                pass
         return ""
 
-    if resp.status_code != 200:
-        return ""
-    if (
-        "login" in resp.url
-        or "authwall" in resp.url
-        or (
-            "/company/" not in resp.url
-            and "/school/" not in resp.url
-        )
-    ):
-        return ""
+    candidate_urls = [normalized, normalized.rstrip("/") + "/about/"]
+    seen_urls = set()
+    for url in candidate_urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # JSON-LD structured data only — anchor scanning picks up too many stray links
-    for script in soup.find_all("script", {"type": "application/ld+json"}):
         try:
-            data = json.loads(script.string or "")
-            # LinkedIn wraps company data in @graph; find the Organization node
-            nodes = data.get("@graph", []) if isinstance(data, dict) else []
-            if not nodes and isinstance(data, dict):
-                nodes = [data]
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                # sameAs = the company's external website
-                same_as = node.get("sameAs", "")
-                if isinstance(same_as, list):
-                    # Prefer root domains over subdomains/deep paths
-                    candidates = [
-                        s for s in same_as
-                        if isinstance(s, str) and "linkedin.com" not in s and s.startswith("http")
-                    ]
-                    def _url_score(u: str) -> tuple:
-                        from urllib.parse import urlparse as _up2
-                        p = _up2(u)
-                        subdomain_depth = p.netloc.count(".") - 1  # more dots = deeper subdomain
-                        path_depth = len([x for x in p.path.split("/") if x])
-                        return (subdomain_depth, path_depth)
-                    candidates.sort(key=_url_score)
-                    same_as = candidates[0] if candidates else ""
-                if same_as and "linkedin.com" not in same_as:
-                    return same_as
-                # Fallback: url field when it's not LinkedIn's own URL
-                site = node.get("url", "")
-                if site and "linkedin.com" not in site:
-                    return site
-        except (json.JSONDecodeError, AttributeError):
-            pass
+            resp = requests.get(
+                url,
+                headers=_BROWSER_HEADERS,
+                timeout=12,
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            continue
+
+        if resp.status_code != 200:
+            continue
+        if (
+            "login" in resp.url
+            or "authwall" in resp.url
+            or ("/company/" not in resp.url and "/school/" not in resp.url)
+        ):
+            continue
+
+        website = _extract_external_site(BeautifulSoup(resp.text, "html.parser"))
+        if website:
+            return website
 
     return ""
 
@@ -983,6 +1157,9 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
     source_cfg = _source_sheet_controls(gs_config)
     source_sheet_name = source_cfg["worksheet"]
     source_company_header = source_cfg["company_header"]
+    source_employee_header = source_cfg["employee_count_header"]
+    source_career_header = source_cfg["career_page_header"]
+    source_linkedin_header = source_cfg["linkedin_url_header"]
 
     creds = _build_credentials(gs_config)
     gc = _gspread_client(creds)
@@ -1012,24 +1189,42 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
     col_idx = _ensure_required_headers(comp_ws, required_headers)
     controls = _enrichment_controls(gs_config)
     validation_controls = _validation_controls(gs_config)
-    retry_na_fields = controls["retry_na_fields"]
+    retry_na_fields = validation_controls["retry_na_fields"]
     retry_invalid_career_values = controls["retry_invalid_career_values"]
     validate_enabled = validation_controls["enabled"]
+    retry_na_when_validation_off = not validate_enabled and retry_na_fields
+    
     if validate_enabled:
-        logger.info("Validation mode enabled: re-checking existing values before enrichment")
+        logger.info("Validation mode enabled: re-checking ALL existing values before enrichment")
+    elif retry_na_when_validation_off:
+        logger.info("Validation mode disabled: but retry_na_fields enabled — will retry NA (red) fields only")
     else:
-        logger.info("Validation mode disabled: only enriching pending fields")
+        logger.info("Validation mode disabled and retry_na_fields disabled: only enriching truly empty fields")
+    
+    if source_cfg["enabled"]:
+        logger.info("Source fallback enabled: will use source data when primary sources fail to find values")
+    else:
+        logger.info("Source fallback disabled: only primary sources (LinkedIn discovery, website probing)")
 
     # ── Task 3: sync new companies from Jobs tab ──────────────────────────────
     # Use Sheets API v4 so we capture the LinkedIn hyperlinks on Company cells
     jobs_company_data = {}
     source_career_data = {}
+    source_employee_data = {}
     if source_cfg["enabled"]:
+        logger.info(
+            "Source headers: "
+            f"company='{source_company_header}', "
+            f"employee='{source_employee_header}', "
+            f"career='{source_career_header}', "
+            f"linkedin='{source_linkedin_header}'"
+        )
         jobs_company_data = get_jobs_company_linkedin(
             sheets_svc,
             spreadsheet_id,
             source_sheet_name,
             company_header=source_company_header,
+            linkedin_header=source_linkedin_header,
         )
         logger.info(
             f"Source tab '{source_sheet_name}' ({source_company_header}): "
@@ -1042,11 +1237,22 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
                 spreadsheet_id,
                 source_sheet_name,
                 company_header=source_company_header,
-                career_page_header=source_cfg["career_page_header"],
+                career_page_header=source_career_header,
             )
             logger.info(
                 f"Source tab career pages available for {len(source_career_data)} companies"
             )
+
+        source_employee_data = get_source_sheet_employee_counts(
+            sheets_svc,
+            spreadsheet_id,
+            source_sheet_name,
+            company_header=source_company_header,
+            employee_count_header=source_employee_header,
+        )
+        logger.info(
+            f"Source tab employee counts available for {len(source_employee_data)} companies"
+        )
     else:
         logger.info("Source sheet usage disabled by config")
 
@@ -1149,6 +1355,8 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
         d_col = _col_index_to_letter(linkedin_i)
 
         if validate_enabled:
+            # FEATURE 1: FULL VALIDATION (validation.enabled=true)
+            # Re-check ALL existing values, normalize, verify, sync colors
             validated_rows += 1
             row_validation_notes = []
             li_status = "missing"
@@ -1256,19 +1464,51 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
                     f"Validation update row {row_num} '{company_name}': "
                     + ", ".join(row_validation_notes)
                 )
+        elif retry_na_when_validation_off:
+            # FEATURE 2: LIGHT NA RETRY (validation.enabled=false but retry_na_fields=true)
+            # Only check NA fields to mark them for retry by enrichment
+            validated_rows += 1
+            invalid_linkedin_cleared = False
+            row_validation_notes = []
+            
+            if _is_na(current_d):
+                # Clear NA LinkedIn so enrichment can refill it
+                _sheets_call(
+                    comp_ws.update,
+                    [[""]],
+                    f"{d_col}{row_num}",
+                    value_input_option="USER_ENTERED",
+                )
+                current_d = ""
+                invalid_linkedin_cleared = True
+                validation_updates += 1
+                row_validation_notes.append("linkedin_cleared_na_for_retry")
+            
+            if row_validation_notes:
+                logger.debug(
+                    f"NA retry row {row_num} '{company_name}': "
+                    + ", ".join(row_validation_notes)
+                )
         else:
+            # No full validation and no NA retry (legacy behavior)
             invalid_linkedin_cleared = False
 
         employee_done = (
             bool(current_b)
-            and _is_numeric_employee_count(current_b)
-            and not (retry_na_fields and _is_na(current_b))
+            and (
+                _is_numeric_employee_count(current_b)
+                or (_is_na(current_b) and not retry_na_fields)
+            )
         )
         career_done = (
             bool(current_c)
-            and bool(_normalize_career_page(current_c))
-            and not (retry_na_fields and _is_na(current_c))
-            and not _is_invalid_career_value(current_c, retry_invalid_career_values)
+            and (
+                (
+                    bool(_normalize_career_page(current_c))
+                    and not _is_invalid_career_value(current_c, retry_invalid_career_values)
+                )
+                or (_is_na(current_c) and not retry_na_fields)
+            )
         )
         linkedin_locked = _is_na(current_d) and not retry_na_fields
 
@@ -1355,11 +1595,18 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
 
         logger.info(f"Row {row_num} | '{company_name}' | {linkedin_url}")
 
-        # Task 1: employee count (LinkedIn only)
+        # Task 1: employee count (LinkedIn first, source fallback)
         employee_count = ""
         if need_employee:
             employee_raw = scrape_employee_count(linkedin_url)
             employee_count = _normalize_employee_count(employee_raw)
+            if not employee_count and source_cfg["enabled"]:
+                source_employee = source_employee_data.get(company_name, "")
+                employee_count = _normalize_source_employee_count(source_employee)
+                if employee_count:
+                    logger.debug(
+                        f"  employee_count (from source): '{employee_count}'"
+                    )
             logger.info(
                 f"  employee_count_raw: '{employee_raw}' | employee_count: '{employee_count}'"
             )
