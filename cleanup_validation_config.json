@@ -1,0 +1,34 @@
+{
+  "logging": {
+    "level": "info"
+  },
+  "cleanup_validation": {
+    "google_sheets": {
+      "credentials_file": "secrets/google-service-account.json",
+      "spreadsheet_id": "1SEIHZXpHu6dnjEJ3MHTdljOPhOnLY-2eRzi5vXIYrmA"
+    },
+    "sheets": {
+      "jobs": {
+        "name": "Jobs",
+        "company_header": "Company",
+        "job_link_header": "Job Link"
+      },
+      "source": {
+        "name": "Company",
+        "company_header": "Company"
+      },
+      "target": {
+        "name": "CompaniesTest",
+        "company_header": "Company"
+      }
+    },
+    "safety": {
+      "dry_run": true,
+      "backup_csv": "logs/cleanup_rows_backup_{now}.csv",
+      "linkedin_report_csv": "logs/jobs_linkedin_company_candidates_{now}.csv"
+    },
+    "behavior": {
+      "sync_missing_to_target": true
+    }
+  }
+}

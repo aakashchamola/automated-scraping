@@ -1,4 +1,7 @@
 {
+    "logging": {
+        "level": "info"
+    },
     "output_file": "jobs.csv",
     "keywords_file": "keywords.txt",
     "request": {
@@ -68,13 +71,14 @@
             "employee_count_header": "Employee-Count",
             "career_page_header": "Career-Page",
             "linkedin_url_header": "Linkedin-Url",
+            "job_link_header": "Job Link",
             "use_for_company_sync": true,
             "use_for_linkedin_fallback": true,
             "use_for_career_fallback": true
         },
         "validation": {
             "enabled": false,
-            "retry_na_fields": false
+            "retry_na_fields": true
         },
         "companies_worksheet": "CompaniesTest",
         "enrichment_controls": {

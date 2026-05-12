@@ -19,6 +19,21 @@ python company_enricher.py --config config.json
 python company_enricher.py --companies-sheet CompaniesTest
 ```
 
+## Logging Modes
+
+Log level is controlled at the top of `config.json`:
+
+```json
+"logging": {
+  "level": "info"
+}
+```
+
+- `info`: current operational logs (default).
+- `debug`: value-level tracing for source reads, target checks, and target replacements.
+
+Use debug when you want to see exactly what each row read/write did in source and destination sheets.
+
 ## What The Script Updates
 
 Destination is controlled by:
@@ -69,9 +84,35 @@ Then source features are controlled by:
 And source tab/header by:
 - `worksheet`
 - `company_header`
+- `employee_count_header`
 - `career_page_header`
+- `linkedin_url_header`
+- `job_link_header`
 
 If company sync is enabled, missing companies are appended into destination before enrichment.
+
+## Module Layout
+
+The code is now split by responsibility so `company_enricher.py` stays focused on orchestration.
+
+- `company_enricher.py`
+  - Loads config, connects to Sheets, coordinates validation and enrichment flow.
+- `enricher/config.py`
+  - Parses feature flags and header names from `config.json`.
+- `enricher/normalizers.py`
+  - Normalizes and validates LinkedIn URLs, career URLs, and employee count values.
+- `enricher/sheets.py`
+  - Handles sheet header lookup, column utilities, and required-header checks.
+- `enricher/source_sheet.py`
+  - Reads mapped LinkedIn URLs, career pages, and employee counts from the source sheet.
+- `enricher/linkedin.py`
+  - Contains LinkedIn URL validation/probing and slug discovery helpers.
+- `enricher/employee.py`
+  - Scrapes employee count from LinkedIn.
+- `enricher/career.py`
+  - Extracts company website data from LinkedIn, including `/about/`, and probes career pages.
+
+This layout makes it safer to change one enrichment rule without reworking the whole pipeline.
 
 ## Current Fallback Order (Per Row)
 
@@ -87,8 +128,16 @@ Career page resolution order:
 3. Otherwise unresolved
 
 Employee count source:
-- Scraped from LinkedIn only
-- No source-sheet employee fallback currently
+1. Scraped from LinkedIn first
+2. Source-sheet employee fallback (if source enabled)
+
+Source employee values can be plain numbers or normalized formats such as:
+- `79,222`
+- `500k`
+- `1.2m`
+- `500-600`
+
+When `job_link_header` is set, the enricher also tries to extract a LinkedIn company or school URL from the Jobs tab job link before probing LinkedIn directly.
 
 ## Three Independent Features
 
@@ -126,12 +175,12 @@ The script has **three independent features** that can be turned on/off separate
 - **Control**: `google_sheets.source_sheet.enabled` + sub-toggles
 - **When ON (`true`)**:
   - Source sheet acts as **fallback** when primary sources (LinkedIn discovery, website probing) fail
-  - If script can't find an employee count via LinkedIn, it doesn't check source (no source for employee)
+  - If script can't find an employee count via LinkedIn, it can fall back to source employee count
   - If script can't find a career page, it checks source (if `use_for_career_fallback=true`)
   - If script can't find a LinkedIn URL, it checks source (if `use_for_linkedin_fallback=true`)
   - If source has a company not in destination, appends it (if `use_for_company_sync=true`)
 - **When OFF (`false`)**:
-  - Only primary sources matter (LinkedIn API, website probing, URL probing)
+  - Only primary sources matter (LinkedIn page scraping, website probing, URL probing)
   - Source sheet is completely ignored
 
 ## Behavior Matrix
@@ -205,7 +254,10 @@ Result: Fast, conservative (only new empty rows enriched)
   "enabled": true,
   "worksheet": "Company",
   "company_header": "Company",
+  "employee_count_header": "Employee-Count",
   "career_page_header": "Career-Page",
+  "linkedin_url_header": "Linkedin-Url",
+    "job_link_header": "Job Link",
   "use_for_company_sync": true,
   "use_for_linkedin_fallback": true,
   "use_for_career_fallback": true
@@ -229,7 +281,10 @@ Result: Fast, conservative (only new empty rows enriched)
   "enabled": true,
   "worksheet": "Company",
   "company_header": "Company",
+  "employee_count_header": "Employee-Count",
   "career_page_header": "Career-Page",
+  "linkedin_url_header": "Linkedin-Url",
+    "job_link_header": "Job Link",
   "use_for_company_sync": true,
   "use_for_linkedin_fallback": true,
   "use_for_career_fallback": true
@@ -253,7 +308,10 @@ Result: Fast, conservative (only new empty rows enriched)
   "enabled": true,
   "worksheet": "Company",
   "company_header": "Company",
+  "employee_count_header": "Employee-Count",
   "career_page_header": "Career-Page",
+  "linkedin_url_header": "Linkedin-Url",
+    "job_link_header": "Job Link",
   "use_for_company_sync": true,
   "use_for_linkedin_fallback": true,
   "use_for_career_fallback": true

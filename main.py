@@ -24,7 +24,7 @@ from scrapers.glassdoor import GlassdoorScraper
 from scrapers.internshala import InternshalaScraper
 from scrapers.lever import LeverScraper
 from scrapers.linkedin import LinkedInScraper
-from logger_setup import setup_logging
+from logger_setup import setup_logging_from_config
 from scrapers.indeed import IndeedScraper
 from scrapers.simplyhired import SimplyHiredScraper
 from scrapers.wellfound import WellfoundScraper
@@ -46,7 +46,6 @@ SCRAPERS = {
     "simplyhired": SimplyHiredScraper,
 }
 
-setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +81,8 @@ def validate_config(config: dict) -> dict:
     request_cfg.setdefault("delay_between_requests", 0)
 
     config.setdefault("platform_settings", {})
+    logging_cfg = config.setdefault("logging", {})
+    logging_cfg.setdefault("level", "info")
     gs_cfg = config.setdefault("google_sheets", {})
     gs_cfg.setdefault("enabled", False)
     gs_cfg.setdefault("credentials_file", "")
@@ -207,5 +208,11 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = validate_config(load_config(args.config))
+    cfg = load_config(args.config)
+    setup_logging_from_config(cfg)
+    logger.info(
+        "Logger initialized from config | level=%s",
+        logging.getLevelName(logging.getLogger().level),
+    )
+    cfg = validate_config(cfg)
     run(cfg)

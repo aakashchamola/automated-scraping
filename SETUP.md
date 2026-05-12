@@ -117,7 +117,17 @@ python main.py --config config.json
 
 **Output:**
 - `jobs.csv` — all scraped jobs, deduplicated
-- `logs/run_<timestamp>.log` — full run log with per-platform counts
+- `logs/scrape_<timestamp>.log` — full run log with per-platform counts
+
+Set log verbosity in `config.json`:
+
+```json
+"logging": {
+  "level": "info"
+}
+```
+
+Use `"debug"` for detailed source/target sheet value tracing.
 
 ---
 
@@ -245,10 +255,41 @@ tail -f logs/enrichment_run.log
 **What it does on each run:**
 1. Syncs any new company names from the Jobs tab into the Companies tab.
 2. For each unenriched row, discovers the LinkedIn company URL, then scrapes employee count and career page.
-3. Writes `NA` (with a red cell background) when a value cannot be found — those rows are skipped on future runs.
+3. Writes `NA` (with a red cell background) when a value cannot be found. Whether those NA fields are retried later depends on config (`validation.retry_na_fields`).
 4. The script is fully idempotent and resumes where it left off; transient network errors are automatically retried (up to 4 attempts with exponential backoff).
 
+For detailed enrichment behavior (validation modes, NA retry matrix, source fallback), see `ENRICHER_CONFIG_GUIDE.md`.
+
 > The Companies tab must already exist in your spreadsheet, or `companies_worksheet` in `config.json` must be set to a name that will be auto-created.
+
+---
+
+## Step 11: Run Cleanup Validation (Optional)
+
+Use this when `CompaniesTest` has stale company rows that are no longer present in either `Jobs` or `Company` tabs.
+
+```bash
+# Uses cleanup_validation_config.json by default
+python cleanup_validation.py
+
+# Explicit config
+python cleanup_validation.py --config cleanup_validation_config.json
+```
+
+Safety flow:
+1. Keep `cleanup_validation_config.json -> cleanup_validation.safety.dry_run = true` for a preview.
+2. Check generated timestamped backup/report files in `logs/`.
+3. If you want missing allowed companies appended into the target sheet, keep `cleanup_validation.behavior.sync_missing_to_target = true`.
+4. Set `dry_run` to `false` and re-run to apply changes to `CompaniesTest`.
+
+What it changes:
+- Clears only target rows in `CompaniesTest` whose company name is not present in union of `Jobs.Company` and `Company.Company`.
+- Sets cleared row background to white.
+- Appends missing allowed company names into `CompaniesTest` when enabled in config.
+
+What it never changes:
+- `Jobs` tab
+- `Company` tab
 
 ---
 
@@ -301,7 +342,7 @@ nohup .venv/bin/python company_enricher.py > logs/enrichment_run.log 2>&1 &
 
 # Check output
 open jobs.csv          # macOS: opens in default app
-cat logs/run_*.log     # view latest scraping log
+cat logs/scrape_*.log     # view latest scraping log
 tail -f logs/enrichment_run.log  # follow enrichment log
 ```
 

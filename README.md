@@ -12,12 +12,23 @@ A modular, config-driven Python pipeline that scrapes job listings from multiple
 automated-scraping/
 ├── main.py                   # Job scraping pipeline entry point
 ├── company_enricher.py       # Standalone company enrichment automation
+├── cleanup_validation.py      # Safe cleanup of stale target company rows
 ├── google_sheets_store.py    # Google Sheets sink/source for jobs pipeline
 ├── storage.py                # Schema normalisation, dedup, CSV persistence
 ├── logger_setup.py           # Shared logging setup (file + stdout)
 ├── config.json               # Runtime configuration for all scripts
+├── ENRICHER_CONFIG_GUIDE.md  # Detailed enrichment behavior/config guide
 ├── keywords.txt              # One keyword per line for job searches
 ├── requirements.txt          # Python dependencies
+│
+├── enricher/                 # Modular helpers used by company_enricher.py
+│   ├── config.py
+│   ├── normalizers.py
+│   ├── sheets.py
+│   ├── source_sheet.py
+│   ├── linkedin.py
+│   ├── employee.py
+│   └── career.py
 │
 ├── scrapers/                 # Platform-specific job scrapers
 │   ├── __init__.py           # BaseScraper abstract class
@@ -115,8 +126,12 @@ A fully standalone script (independent of `main.py`) that reads the **Companies*
 
 **Processing rules:**
 - Row 1 is always the header row; data starts at row 2.
-- A row is skipped if column B or C already has any value (including `NA`).
-- A row is skipped if column D is `NA` (LinkedIn lookup was already attempted and failed).
+- Enrichment behavior is controlled by three independent config features:
+  - `google_sheets.validation.enabled`
+  - `google_sheets.validation.retry_na_fields`
+  - `google_sheets.source_sheet.enabled` (+ source fallback toggles)
+- Depending on config, rows may be fully re-validated, NA fields may be retried, or only empty fields may be processed.
+   - Source-sheet LinkedIn fallback can also read `Job Link` when `google_sheets.source_sheet.job_link_header` is set.
 - When a value cannot be found, `NA` is written to that cell and the cell background is colored **red** — so you can see at a glance what needs manual attention.
 - Idempotent: safe to run multiple times; already-filled cells are never overwritten.
 
@@ -129,6 +144,8 @@ A fully standalone script (independent of `main.py`) that reads the **Companies*
 
 **Resilience:** All Google Sheets write operations (`update`, `format`) are wrapped with automatic retry — up to 4 attempts with exponential backoff (8 s, 16 s, 32 s, 64 s) on transient network errors (`ConnectionResetError`, timeouts) and API rate-limit responses (HTTP 429/5xx). The script will not crash on a single dropped connection.
 
+For full enrichment behavior and profile examples, see [ENRICHER_CONFIG_GUIDE.md](ENRICHER_CONFIG_GUIDE.md).
+
 **Usage:**
 ```bash
 python company_enricher.py
@@ -137,6 +154,20 @@ python company_enricher.py --config config.json --companies-sheet "Companies"
 # Run in background and log output
 nohup python company_enricher.py > logs/enrichment_run.log 2>&1 &
 ```
+
+---
+
+### `enricher/` — Modular Enrichment Package
+
+`company_enricher.py` orchestrates flow and delegates logic to focused modules:
+
+- `enricher/config.py`: parses validation/source/enrichment controls and column/header config.
+- `enricher/normalizers.py`: normalizes/validates LinkedIn URLs, career URLs, and employee count formats.
+- `enricher/sheets.py`: sheet header/index helpers and column hyperlink reads.
+- `enricher/source_sheet.py`: source worksheet readers for company/linkedin/career/employee mappings.
+- `enricher/linkedin.py`: LinkedIn slug discovery and profile status checks.
+- `enricher/employee.py`: employee count scraping.
+- `enricher/career.py`: website extraction (including LinkedIn `/about/`) and career-page probing.
 
 ---
 
@@ -241,14 +272,29 @@ Activated only when `config.google_sheets.enabled = true`.
 
 ### `logger_setup.py` — Logging
 
+Centralized logger service used by both `main.py` and `company_enricher.py`.
+
 Sets up two handlers:
 
 | Handler | Output | Level |
 |---|---|---|
-| `StreamHandler` | stdout | INFO |
-| `FileHandler` | `logs/run_YYYYMMDD_HHMMSS.log` | DEBUG |
+| `StreamHandler` | stdout | from config |
+| `FileHandler` | `logs/scrape_YYYYMMDD_HHMMSS.log` | from config |
 
 `logs/` directory is created automatically on first run.
+
+Log level is controlled from `config.json`:
+
+```json
+"logging": {
+  "level": "info"
+}
+```
+
+Supported values are `info` and `debug` (case-insensitive).
+
+- `info`: keeps current high-level operational logs.
+- `debug`: adds full value-level tracing for source and target sheet checks/replacements.
 
 ---
 
@@ -258,6 +304,9 @@ Full schema with all supported keys:
 
 ```json
 {
+  "logging": {
+    "level": "info"
+  },
   "output_file": "jobs.csv",
   "keywords_file": "keywords.txt",
 
@@ -293,7 +342,32 @@ Full schema with all supported keys:
     "credentials_file": "secrets/google-service-account.json",
     "spreadsheet_id": "",
     "worksheet": "Jobs",
-    "companies_worksheet": "Companies"
+    "companies_worksheet": "Companies",
+    "source_sheet": {
+      "enabled": true,
+      "worksheet": "Company",
+      "company_header": "Company",
+      "employee_count_header": "Employee-Count",
+      "career_page_header": "Career-Page",
+      "linkedin_url_header": "Linkedin-Url",
+      "job_link_header": "Job Link",
+      "use_for_company_sync": true,
+      "use_for_linkedin_fallback": true,
+      "use_for_career_fallback": true
+    },
+    "validation": {
+      "enabled": false,
+      "retry_na_fields": false
+    },
+    "enrichment_controls": {
+      "retry_invalid_career_values": ["://", ""]
+    },
+    "companies_columns": {
+      "company": "Company",
+      "employee_count": "Employee Count",
+      "career_page": "Career Page",
+      "linkedin_url": "LinkedIn URL"
+    }
   }
 }
 ```
@@ -315,6 +389,11 @@ Full schema with all supported keys:
 | `google_sheets.spreadsheet_id` | ID from the Google Sheet URL |
 | `google_sheets.worksheet` | Jobs tab name inside the spreadsheet |
 | `google_sheets.companies_worksheet` | Companies tab name for the enrichment automation |
+| `google_sheets.source_sheet.*` | Source worksheet controls + header mappings for sync/fallback |
+| `google_sheets.source_sheet.job_link_header` | Optional Jobs-tab column used to extract LinkedIn company URLs |
+| `google_sheets.validation.*` | Validation master switch + NA retry behavior |
+| `google_sheets.enrichment_controls.retry_invalid_career_values` | Values treated as invalid and eligible for retry |
+| `google_sheets.companies_columns.*` | Destination Companies worksheet header names |
 
 ---
 
@@ -371,10 +450,25 @@ python main.py --config config.json
 
 # Company enrichment (separate automation)
 python company_enricher.py
+python company_enricher.py --companies-sheet CompaniesTest
+
+# Cleanup target rows that are not in Jobs/Company reference sheets
+python cleanup_validation.py
+python cleanup_validation.py --config cleanup_validation_config.json
 
 # Run enrichment in background with log
 nohup python company_enricher.py > logs/enrichment_run.log 2>&1 &
+nohup python cleanup_validation.py > logs/cleanup_validation_run.log 2>&1 &
 
+`cleanup_validation.py` behavior summary:
+- Reads unique company names from `Jobs` and `Company` tabs.
+- Builds union of those names as the allowed set.
+- Appends missing allowed company names into the target sheet when `cleanup_validation.behavior.sync_missing_to_target=true`.
+- In `CompaniesTest`, clears rows whose company is not in that allowed set.
+- Resets cleared row background to white.
+- Never writes to `Jobs` or `Company` tabs.
+- Uses timestamped backup/report CSV files under `logs/` by default.
+- Default cleanup config uses `dry_run=true`; set it to `false` only after previewing the output.
 # Quick platform health check (one keyword, all platforms)
 python tests/smoke_test.py
 ```
