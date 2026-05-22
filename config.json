@@ -65,7 +65,7 @@
         "company_source_worksheet": "Company",
         "company_source_header": "Company",
         "source_sheet": {
-            "enabled": true,
+            "enabled": false,
             "worksheet": "Company",
             "company_header": "Company",
             "employee_count_header": "Employee-Count",
@@ -81,13 +81,6 @@
             "retry_na_fields": true
         },
         "companies_worksheet": "CompaniesTest",
-        "enrichment_controls": {
-            "retry_na_fields": true,
-            "retry_invalid_career_values": [
-                "://",
-                ""
-            ]
-        },
         "companies_columns": {
             "company": "Company",
             "employee_count": "Employee Count",

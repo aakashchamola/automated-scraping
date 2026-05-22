@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from . import normalizers
+from . import search as ddg_search
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,78 @@ _JOB_BOARD_DOMAINS = [
 ]
 
 _CAREER_KEYWORDS = {"career", "careers", "job", "jobs", "hiring", "recruit", "join", "work-with"}
+
+# Common TLD/suffix candidates when guessing a company domain from a slug.
+_DOMAIN_TLDS = (".com", ".io", ".co", ".ai", ".net", ".org")
+
+
+def _homepage_matches_slug(url: str, slug_tokens: list, timeout: int = 6) -> bool:
+    """GET homepage; True iff its title/meta mentions any slug token.
+
+    Guards slug-guessed domains against parked / squatted domains that
+    happen to resolve but belong to nobody.
+    """
+    if not slug_tokens:
+        return False
+    try:
+        resp = requests.get(
+            url,
+            headers=_BROWSER_HEADERS,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return False
+    if resp.status_code != 200:
+        return False
+    soup = BeautifulSoup(resp.text, "html.parser")
+    haystack_parts = []
+    if soup.title and soup.title.string:
+        haystack_parts.append(soup.title.string)
+    for meta_attr in ({"name": "description"}, {"property": "og:title"},
+                       {"property": "og:description"}, {"property": "og:site_name"}):
+        tag = soup.find("meta", meta_attr)
+        if tag and tag.get("content"):
+            haystack_parts.append(tag["content"])
+    haystack = " ".join(haystack_parts).lower()
+    return any(tok in haystack for tok in slug_tokens if len(tok) >= 3)
+
+
+def _guess_website_from_linkedin_slug(linkedin_url: str) -> str:
+    """Probe candidate domains derived from the LinkedIn slug.
+
+    A candidate is accepted only if the homepage actually mentions the slug —
+    guards against parked/squatted domains.
+    """
+    if not linkedin_url:
+        return ""
+    m = re.search(r"linkedin\.com/(?:company|school)/([^/?#]+)", linkedin_url)
+    if not m:
+        return ""
+    slug = m.group(1).lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", slug) if t]
+    if not tokens:
+        return ""
+
+    roots = []
+    for r in (slug, slug.replace("-", "")):
+        if r and r not in roots:
+            roots.append(r)
+
+    for root in roots:
+        for tld in _DOMAIN_TLDS:
+            candidate = f"https://www.{root}{tld}"
+            if not probe_url(candidate, timeout=5):
+                # Try bare hostname too (some sites don't serve www.)
+                bare = f"https://{root}{tld}"
+                if not probe_url(bare, timeout=5):
+                    continue
+                candidate = bare
+            if _homepage_matches_slug(candidate, tokens):
+                logger.debug(f"website via slug guess (verified): {candidate}")
+                return candidate
+            logger.debug(f"slug-guess candidate {candidate} resolves but doesn't match slug — reject")
+    return ""
 
 
 def get_company_website(linkedin_url: str) -> str:
@@ -244,8 +317,27 @@ def find_career_page(company_name: str, linkedin_url: str, website: str = "") ->
     if not normalizers.is_valid_url(website):
         website = ""
 
+    if not website and linkedin_url:
+        # Slug-based domain guess: probe stripe.com / abbottlabs.com etc.
+        # No network for search engines needed — pure HEAD probes.
+        website = _guess_website_from_linkedin_slug(linkedin_url)
+        if website:
+            logger.info(
+                f"Career page: website resolved via slug guess for '{company_name}': {website}"
+            )
+
+    if not website and company_name:
+        # Final fallback: search engines (best-effort; may be IP-blocked).
+        website = ddg_search.find_company_website(company_name)
+        if website:
+            logger.info(
+                f"Career page: website resolved via search for '{company_name}': {website}"
+            )
+
     if not website:
-        logger.debug(f"No website via LinkedIn for '{company_name}', cannot determine career page")
+        logger.debug(
+            f"No website (LinkedIn / slug / search) for '{company_name}', cannot determine career page"
+        )
         return ""
 
     parsed = urlparse(website)

@@ -683,7 +683,9 @@ def enrich(gs_config: dict, companies_sheet_name: str) -> None:
         # Task 1: employee count (LinkedIn first, website fallback, source fallback)
         employee_count = ""
         if need_employee:
-            employee_raw = employee_helpers.scrape_employee_count(linkedin_url, website=company_website)
+            employee_raw = employee_helpers.scrape_employee_count(
+                linkedin_url, website=company_website, company_name=company_name,
+            )
             employee_count = normalizers.normalize_employee_count(employee_raw)
             if not employee_count and source_cfg["enabled"]:
                 source_employee = source_employee_data.get(company_name, "")
