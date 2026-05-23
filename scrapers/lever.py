@@ -19,10 +19,10 @@ class LeverScraper(BaseScraper):
         self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        settings = self.config.get("platform_settings", {}).get("lever", {})
+        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("lever", {})
         location = str(settings.get("location", "United States")).strip()
         sites = settings.get("sites", [])
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         if not sites:
             logger.warning(
@@ -42,7 +42,7 @@ class LeverScraper(BaseScraper):
                 response = self._session.get(
                     url,
                     params=params,
-                    timeout=self.config.get("request", {}).get("timeout", 10),
+                    timeout=self.config.get("http", {}).get("timeout_seconds", 10),
                 )
                 response.raise_for_status()
                 postings = response.json()

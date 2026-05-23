@@ -43,10 +43,10 @@ class IndeedScraper(BaseScraper):
     # Session with automatic retry on transient HTTP errors
     # ------------------------------------------------------------------
     def _build_session(self) -> requests.Session:
-        req_cfg = self.config.get("request", {})
+        req_cfg = self.config.get("http", {})
         retry = Retry(
             total=req_cfg.get("max_retries", 3),
-            backoff_factor=req_cfg.get("retry_delay", 2),
+            backoff_factor=req_cfg.get("retry_delay_seconds", 2),
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET"],
             raise_on_status=False,
@@ -62,7 +62,7 @@ class IndeedScraper(BaseScraper):
     # ------------------------------------------------------------------
     def fetch_jobs(self, keyword: str) -> list:
         jobs = []
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
         location_query = self._location_query()
         country_code = self._country_code()
 
@@ -83,7 +83,7 @@ class IndeedScraper(BaseScraper):
                     self._base_url,
                     params=params,
                     headers=_HEADERS,
-                    timeout=self.config.get("request", {}).get("timeout", 10),
+                    timeout=self.config.get("http", {}).get("timeout_seconds", 10),
                 )
                 response.raise_for_status()
             except requests.exceptions.HTTPError as exc:
@@ -109,11 +109,11 @@ class IndeedScraper(BaseScraper):
         return jobs
 
     def _location_query(self) -> str:
-        indeed_cfg = self.config.get("platform_settings", {}).get("indeed", {})
+        indeed_cfg = self.config.get("scraping", {}).get("platform_settings", {}).get("indeed", {})
         return str(indeed_cfg.get("location", "United States")).strip()
 
     def _country_code(self) -> str:
-        indeed_cfg = self.config.get("platform_settings", {}).get("indeed", {})
+        indeed_cfg = self.config.get("scraping", {}).get("platform_settings", {}).get("indeed", {})
         return str(indeed_cfg.get("country", "us")).strip().lower()
 
     def _resolve_domain(self) -> str:
@@ -127,7 +127,7 @@ class IndeedScraper(BaseScraper):
         return domains.get(self._country_code(), "www.indeed.com")
 
     def _page_starts(self) -> list:
-        indeed_cfg = self.config.get("platform_settings", {}).get("indeed", {})
+        indeed_cfg = self.config.get("scraping", {}).get("platform_settings", {}).get("indeed", {})
         max_pages = int(indeed_cfg.get("max_pages", 1))
         max_pages = max(1, max_pages)
         return [page * 10 for page in range(max_pages)]

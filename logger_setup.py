@@ -17,12 +17,18 @@ def setup_logging(
     log_dir: str = "logs",
     level: str | int = "INFO",
     *,
+    name: str = "scrape",
     force: bool = False,
-) -> None:
-    """Configure logging to write to both console and a timestamped log file."""
+) -> str:
+    """Configure logging to write to both console and a timestamped log file.
+
+    Each run gets its own file named ``<name>_<YYYYmmdd_HHMMSS>.log`` so every
+    service/entry point produces a distinct, identifiable log. Returns the
+    log file path.
+    """
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(
-        log_dir, f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_dir, f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
     logging.basicConfig(
         level=_coerce_level(level),
@@ -33,10 +39,17 @@ def setup_logging(
         ],
         force=force,
     )
+    logging.getLogger(__name__).info(f"Logging to {log_file}")
+    return log_file
 
 
-def setup_logging_from_config(config: dict, log_dir: str = "logs") -> None:
-    """Configure logging from config.json using top-level logging.level."""
+def setup_logging_from_config(
+    config: dict, log_dir: str = "logs", *, name: str = "scrape"
+) -> str:
+    """Configure logging from config.json using top-level logging.level.
+
+    ``name`` sets the per-run log file prefix (e.g. "pipeline", "validate").
+    """
     logging_cfg = config.get("logging", {}) if isinstance(config, dict) else {}
     level = logging_cfg.get("level", "INFO")
-    setup_logging(log_dir=log_dir, level=level, force=True)
+    return setup_logging(log_dir=log_dir, level=level, name=name, force=True)

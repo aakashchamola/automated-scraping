@@ -21,7 +21,7 @@ class InternshalaScraper(BaseScraper):
         self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
         url = self.BASE_URL.format(quote_plus(keyword.replace(" ", "-")))
 
         logger.info(f"[Internshala] GET {url} | keyword='{keyword}'")

@@ -21,9 +21,9 @@ class YCombinatorScraper(BaseScraper):
         self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        settings = self.config.get("platform_settings", {}).get("ycombinator", {})
+        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("ycombinator", {})
         location = str(settings.get("location", "United States")).strip()
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         params = {
             "query": keyword,

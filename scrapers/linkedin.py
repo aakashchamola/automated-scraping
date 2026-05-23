@@ -21,10 +21,10 @@ class LinkedInScraper(BaseScraper):
         self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        settings = self.config.get("platform_settings", {}).get("linkedin", {})
+        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("linkedin", {})
         location = str(settings.get("location", "United States")).strip()
         max_pages = max(1, int(settings.get("max_pages", 1)))
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         jobs = []
         for page in range(max_pages):

@@ -26,10 +26,10 @@ class GlassdoorScraper(BaseScraper):
             logger.warning("[Glassdoor] Skipping: security page detected")
             return []
 
-        settings = self.config.get("platform_settings", {}).get("glassdoor", {})
+        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("glassdoor", {})
         location = str(settings.get("location", "United States")).strip()
         max_pages = max(1, int(settings.get("max_pages", 1)))
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         jobs = []
         for page in range(max_pages):

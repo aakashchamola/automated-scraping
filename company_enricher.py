@@ -1,28 +1,30 @@
 """
 company_enricher.py — Standalone company enrichment pipeline.
 
-Reads a "Companies" tab in your Google Sheet and:
+Reads the enrichment output worksheet (config: google_sheets.enrichment_output_worksheet)
+and fills in missing data by scraping LinkedIn and company websites:
     - Task 1: fills Employee-Count column (scraped from LinkedIn)
     - Task 2: fills Career-Page column
-  - Task 3: syncs unique company names from the Jobs tab into the Companies tab
+    - Task 3: syncs unique company names from the Jobs tab into the enrichment sheet
 
 Rules:
     - Row 1 is a header row; data starts from row 2
-    - Column/header mapping is configurable via config.json
+    - Column/header mapping is configurable via config.yaml (google_sheets.enrichment_output_columns)
     - Only rows where BOTH employee and career columns are empty are processed
     - No duplicate company entries are added from the Jobs tab
 
 Usage:
     python company_enricher.py
-    python company_enricher.py --config config.json --companies-sheet "Companies"
+    python company_enricher.py --config config.yaml --companies-sheet "CompaniesTest"
 """
 
 import argparse
-import json
 import logging
 import sys
 import time
 import requests
+
+from config_loader import load_config
 
 from enricher import config as config_helpers
 from enricher import career as career_helpers
@@ -85,20 +87,6 @@ _CAREER_SUBDOMAINS = ["careers", "jobs", "work"]
 
 # Delay between LinkedIn requests (seconds) — keeps us under rate limits
 _LINKEDIN_DELAY = 4
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
-def load_config(path: str) -> dict:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except FileNotFoundError:
-        logger.error(f"Config file not found: '{path}'")
-        sys.exit(1)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Config JSON is invalid: {exc}")
-        sys.exit(1)
-
 
 # ── Google Auth ───────────────────────────────────────────────────────────────
 
@@ -819,14 +807,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="config.json",
-        help="Path to config.json (default: config.json)",
+        default="config.yaml",
+        help="Path to config.yaml or config.json (default: config.yaml)",
     )
     parser.add_argument(
         "--companies-sheet",
         default=None,
         dest="companies_sheet",
-        help="Name of the Companies worksheet (overrides config.json google_sheets.companies_worksheet)",
+        help="Enrichment output worksheet name (overrides config.yaml google_sheets.enrichment_output_worksheet)",
     )
     return parser.parse_args()
 
@@ -834,7 +822,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     config = load_config(args.config)
-    setup_logging_from_config(config)
+    setup_logging_from_config(config, name="enrich")
     logger.info(
         "Logger initialized from config | level=%s",
         logging.getLevelName(logging.getLogger().level),
@@ -851,7 +839,7 @@ def main() -> None:
     # CLI arg overrides config; config overrides default
     companies_sheet = (
         args.companies_sheet
-        or gs_config.get("companies_worksheet", "Companies")
+        or gs_config.get("enrichment_output_worksheet", "CompaniesTest")
     )
     enrich(gs_config, companies_sheet)
 

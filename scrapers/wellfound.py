@@ -26,9 +26,9 @@ class WellfoundScraper(BaseScraper):
             logger.warning("[Wellfound] Skipping: access blocked by anti-bot checks")
             return []
 
-        settings = self.config.get("platform_settings", {}).get("wellfound", {})
+        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("wellfound", {})
         location = str(settings.get("location", "United States")).strip()
-        delay = float(self.config.get("request", {}).get("delay_between_requests", 0))
+        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         params = {
             "query": keyword,

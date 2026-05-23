@@ -1,0 +1,163 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Automated Biotech Job Scraping Pipeline — Configuration
+#
+# Entry points:
+#   python automation_pipeline.py          → runs all 4 pipeline steps in order
+#   python main.py                         → keyword scraping only
+#   python job_validator.py                → job URL validation only
+#   python company_enricher.py             → company data enrichment only
+#
+# Test tabs (safe to destroy): Jobs_Test, CompaniesTest, CompaniesTest2
+# Production tabs (do not overwrite): Jobs, Company, People, Keywords
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: info       # debug | info | warning | error
+
+
+# ── HTTP / Network ────────────────────────────────────────────────────────────
+# Shared network settings used by all scrapers and the job validator.
+http:
+  timeout_seconds: 10                    # seconds before a request is aborted
+  max_retries: 3                         # retry attempts on transient failures
+  retry_delay_seconds: 1                 # seconds to wait between retries
+  delay_between_requests_seconds: 0      # polite pause between consecutive requests (0 = off)
+
+
+# ── Keyword Scraping ──────────────────────────────────────────────────────────
+# Searches job boards (LinkedIn, Indeed, Glassdoor, etc.) for jobs matching
+# each keyword. Results are written to jobs_worksheet + output_csv.
+scraping:
+  output_csv: jobs.csv                   # local CSV backup; Google Sheets is the primary sink
+  keywords_fallback_file: keywords.txt   # used when keywords_source.mode = file
+                                         # or when the Keywords sheet returns nothing
+
+  # Where to load search keywords from.
+  #   mode: sheet  → reads from the "Keywords" Google Sheet tab  (preferred)
+  #   mode: file   → reads from keywords_fallback_file instead
+  keywords_source:
+    mode: sheet
+    worksheet: Keywords                  # tab name in Google Sheets
+    column: Search Term                  # column header within that tab
+
+  # Active job-board platforms in scrape order.
+  # Remove or comment out any line to skip that platform.
+  platforms:
+    - linkedin
+    - indeed
+    - glassdoor
+    - jobs.lever
+    - internshala
+    - wellfound
+    - ycombinator
+    - simplyhired
+
+  # Per-platform tuning. Each key must match a platform name in the list above.
+  platform_settings:
+    linkedin:
+      location: United States
+      max_pages: 1
+
+    indeed:
+      country: us
+      location: United States
+      max_pages: 1
+
+    glassdoor:
+      location: United States
+      max_pages: 1
+      loc_id: ""           # numeric Glassdoor location ID (leave blank for any location)
+
+    jobs.lever:
+      location: United States
+      max_pages: 1
+      sites: []            # list of Lever company slugs to target (empty = use keyword search)
+
+    internshala:
+      location: United States
+      max_pages: 1
+
+    wellfound:
+      location: United States
+      max_pages: 1
+
+    ycombinator:
+      location: United States
+      max_pages: 1
+
+    simplyhired:
+      location: United States
+      max_pages: 1
+
+
+# ── Career-Page Scraping ──────────────────────────────────────────────────────
+# Scrapes job postings directly from company career pages (not job boards).
+# Career page URLs come from the "Career-Page" column in the Company sheet.
+# Only jobs whose title contains at least one keyword are kept.
+career_pages:
+  source_worksheet: Company          # Sheet tab with manually-curated company data
+  company_column: Company            # Column header for company name in that tab
+  career_page_column: Career-Page    # Column header for career page URL (hyphen as-is in sheet)
+  max_jobs_per_company: 50           # safety cap: max jobs collected per company per run
+
+
+# ── Job Validation ────────────────────────────────────────────────────────────
+# Probes every "Job Link" in the jobs sheet and writes one of:
+#   Active   — URL responds 2xx/3xx  (row stays white)
+#   Expired  — posting is closed (LinkedIn "no longer accepting" banner or other 4xx)  (row → red)
+#   Removed  — URL is gone (404 / 410)  (row → red)
+#   Unknown  — network error or 5xx; will retry next run  (row → yellow)
+job_validation:
+  re_validate: false    # false → skip rows that already have a status (fast, saves API calls)
+                        # true  → re-check every URL regardless of existing status
+
+
+# ── Google Sheets ─────────────────────────────────────────────────────────────
+google_sheets:
+  enabled: true
+  credentials_file: secrets/google-service-account.json
+  spreadsheet_id: 1SEIHZXpHu6dnjEJ3MHTdljOPhOnLY-2eRzi5vXIYrmA
+
+  # The tab where scraped jobs land.
+  # ⚠ Switch between Jobs_Test (testing) and Jobs (production) here.
+  jobs_worksheet: Jobs_Test
+
+
+  # ── Company Data (manually curated) ─────────────────────────────────────────
+  # The "Company" tab is the hand-maintained source of truth for company metadata.
+  # It is NOT written to by automation — only read from.
+  company_sheet:
+    worksheet: Company
+    company_column: Company
+    employee_count_column: Employee-Count   # hyphenated to match actual sheet header
+    career_page_column: Career-Page         # hyphenated to match actual sheet header
+    linkedin_url_column: Linkedin-Url       # hyphenated to match actual sheet header
+    job_link_column: Job Link
+
+    # What this sheet is used for during pipeline runs:
+    sync_companies_to_enrichment: true      # copy new company names from Jobs → enrichment sheet
+    use_for_linkedin_hyperlinks: true       # hyperlink company names in Jobs to their LinkedIn page
+    use_for_career_page_fallback: true      # fall back to this sheet when a career page URL is missing
+
+
+  # ── Enrichment Output ────────────────────────────────────────────────────────
+  # company_enricher.py writes scraped data (employee count, career page, LinkedIn URL)
+  # into this worksheet. This is automation-written — safe to reset for testing.
+  enrichment_output_worksheet: CompaniesTest
+
+  # Column headers in the enrichment output worksheet (must match the actual sheet headers exactly).
+  enrichment_output_columns:
+    company: Company
+    employee_count: Employee Count
+    career_page: Career Page
+    linkedin_url: LinkedIn URL
+
+
+  # ── Enrichment Controls ──────────────────────────────────────────────────────
+  # Controls when the enricher should re-scrape cells that already contain a value.
+  enrichment_controls:
+    retry_na_fields: false               # true → re-scrape cells whose current value is "N/A"
+    retry_invalid_career_values:         # re-scrape career page cells that match any of these strings
+      - "://"

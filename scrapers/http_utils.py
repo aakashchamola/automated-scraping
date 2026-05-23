@@ -18,10 +18,10 @@ DEFAULT_HEADERS = {
 
 
 def build_session(config: dict) -> requests.Session:
-    req_cfg = config.get("request", {})
+    req_cfg = config.get("http", {})
     retry = Retry(
         total=req_cfg.get("max_retries", 3),
-        backoff_factor=req_cfg.get("retry_delay", 1),
+        backoff_factor=req_cfg.get("retry_delay_seconds", 1),
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
@@ -41,7 +41,7 @@ def get_html(
     headers: Optional[dict] = None,
 ) -> str:
     req_headers = headers or DEFAULT_HEADERS
-    timeout = config.get("request", {}).get("timeout", 10)
+    timeout = config.get("http", {}).get("timeout_seconds", 10)
 
     response = session.get(url, params=params, headers=req_headers, timeout=timeout)
     response.raise_for_status()

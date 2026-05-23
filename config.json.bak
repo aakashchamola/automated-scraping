@@ -2,8 +2,22 @@
     "logging": {
         "level": "info"
     },
+    "job_validation": {
+        "re_validate": false
+    },
     "output_file": "jobs.csv",
     "keywords_file": "keywords.txt",
+    "keywords_source": {
+        "mode": "sheet",
+        "worksheet": "Keywords",
+        "column": "Search Term"
+    },
+    "career_scraping": {
+        "source_worksheet": "Company",
+        "company_column": "Company",
+        "career_page_column": "Career-Page",
+        "max_jobs_per_company": 50
+    },
     "request": {
         "timeout": 10,
         "max_retries": 3,
@@ -61,7 +75,7 @@
         "enabled": true,
         "credentials_file": "secrets/google-service-account.json",
         "spreadsheet_id": "1SEIHZXpHu6dnjEJ3MHTdljOPhOnLY-2eRzi5vXIYrmA",
-        "worksheet": "Jobs",
+        "worksheet": "Jobs_Test",
         "company_source_worksheet": "Company",
         "company_source_header": "Company",
         "source_sheet": {

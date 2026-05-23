@@ -2,23 +2,23 @@
 main.py — Job scraping pipeline entry point.
 
 Usage:
-    python main.py                        # uses config.json
-    python main.py --config my_cfg.json   # custom config file
+    python main.py                          # uses config.yaml
+    python main.py --config config.yaml     # explicit config file
 
 Adding a new platform:
     1. Create scrapers/<platform>.py with a class subclassing BaseScraper
     2. Import it here and add it to SCRAPERS
-    3. Add the platform name to config.json "platforms" list
+    3. Add the platform name to config.yaml under scraping.platforms
 """
 
 import argparse
-import json
 import logging
 import sys
 
 import pandas as pd
 
 import storage
+from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from scrapers.glassdoor import GlassdoorScraper
 from scrapers.internshala import InternshalaScraper
@@ -51,43 +51,36 @@ logger = logging.getLogger(__name__)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def load_config(path: str) -> dict:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except FileNotFoundError:
-        logger.error(f"Config file not found: '{path}'")
-        sys.exit(1)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Config file is not valid JSON: {exc}")
-        sys.exit(1)
-
-
 def validate_config(config: dict) -> dict:
-    required = ["output_file", "keywords_file", "platforms"]
-    missing = [key for key in required if key not in config]
-    if missing:
-        logger.error(f"Missing required config keys: {missing}")
+    """Apply defaults for all optional config sections so downstream code
+    can always do simple .get() without checking for key existence."""
+    scraping = config.setdefault("scraping", {})
+    scraping.setdefault("output_csv", "jobs.csv")
+    scraping.setdefault("keywords_fallback_file", "keywords.txt")
+    scraping.setdefault("keywords_source", {})
+    scraping.setdefault("platforms", [])
+    scraping.setdefault("platform_settings", {})
+
+    if not isinstance(scraping.get("platforms"), list):
+        logger.error("Config key 'scraping.platforms' must be a list")
         sys.exit(1)
 
-    if not isinstance(config.get("platforms"), list):
-        logger.error("Config key 'platforms' must be a list")
-        sys.exit(1)
+    http = config.setdefault("http", {})
+    http.setdefault("timeout_seconds", 10)
+    http.setdefault("max_retries", 3)
+    http.setdefault("retry_delay_seconds", 1)
+    http.setdefault("delay_between_requests_seconds", 0)
 
-    request_cfg = config.setdefault("request", {})
-    request_cfg.setdefault("timeout", 10)
-    request_cfg.setdefault("max_retries", 3)
-    request_cfg.setdefault("retry_delay", 1)
-    request_cfg.setdefault("delay_between_requests", 0)
+    config.setdefault("career_pages", {})
+    config.setdefault("job_validation", {})
+    config.setdefault("logging", {}).setdefault("level", "info")
 
-    config.setdefault("platform_settings", {})
-    logging_cfg = config.setdefault("logging", {})
-    logging_cfg.setdefault("level", "info")
-    gs_cfg = config.setdefault("google_sheets", {})
-    gs_cfg.setdefault("enabled", False)
-    gs_cfg.setdefault("credentials_file", "")
-    gs_cfg.setdefault("spreadsheet_id", "")
-    gs_cfg.setdefault("worksheet", "Jobs")
+    gs = config.setdefault("google_sheets", {})
+    gs.setdefault("enabled", False)
+    gs.setdefault("credentials_file", "")
+    gs.setdefault("spreadsheet_id", "")
+    gs.setdefault("jobs_worksheet", "Jobs")
+
     return config
 
 
@@ -103,11 +96,44 @@ def load_keywords(path: str) -> list:
         sys.exit(1)
 
 
+def resolve_keywords(config: dict) -> list:
+    """Load keywords from the Keywords sheet when configured, else the txt file.
+
+    config.scraping.keywords_source.mode = "sheet" | "file"
+    Falls back to the txt file if the sheet yields nothing.
+    """
+    scraping = config.get("scraping", {})
+    src = scraping.get("keywords_source", {})
+    fallback_file = scraping.get("keywords_fallback_file", "keywords.txt")
+
+    if src.get("mode") == "sheet":
+        worksheet = src.get("worksheet", "Keywords")
+        column = src.get("column", "Search Term")
+        store = GoogleSheetsStore(config.get("google_sheets", {}))
+        try:
+            keywords = store.load_column_values(column, worksheet)
+        except Exception as exc:
+            logger.error(f"Failed to read keywords from sheet '{worksheet}': {exc}")
+            keywords = []
+        if keywords:
+            logger.info(
+                f"Loaded {len(keywords)} keywords from sheet '{worksheet}' "
+                f"column '{column}'"
+            )
+            return keywords
+        logger.warning(
+            f"No keywords from sheet '{worksheet}'; falling back to '{fallback_file}'"
+        )
+    return load_keywords(fallback_file)
+
+
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 
 def run(config: dict) -> None:
-    keywords = load_keywords(config["keywords_file"])
-    platforms = config.get("platforms", [])
+    scraping = config.get("scraping", {})
+    keywords = resolve_keywords(config)
+    platforms = scraping.get("platforms", [])
+    output_csv = scraping.get("output_csv", "jobs.csv")
 
     logger.info(
         f"Pipeline start | platforms={platforms} | keywords={keywords}"
@@ -160,8 +186,7 @@ def run(config: dict) -> None:
         return
 
     new_df = pd.DataFrame(all_new_jobs)
-
-    existing_csv_df = storage.load_existing(config["output_file"])
+    existing_csv_df = storage.load_existing(output_csv)
 
     sheet_store = GoogleSheetsStore(config.get("google_sheets", {}))
     existing_sheet_df = pd.DataFrame(columns=storage.OUTPUT_COLUMNS)
@@ -178,19 +203,29 @@ def run(config: dict) -> None:
     )
 
     merged_df = storage.deduplicate(new_df, existing_combined_df)
-    storage.save(merged_df, config["output_file"])
+    storage.save(merged_df, output_csv)
 
     if sheet_store.is_enabled():
         rows_to_append = storage.get_new_rows(new_df, existing_combined_df)
+        # Hyperlink the Company cell to its LinkedIn URL when the company is in
+        # our Company database sheet.
+        cs = config.get("career_pages", {})
         try:
-            sheet_store.append_rows(rows_to_append)
+            company_linkedin = sheet_store.load_company_linkedin_map(
+                worksheet_name=cs.get("source_worksheet", "Company"),
+                company_col=cs.get("company_column", "Company"),
+            )
+        except Exception as exc:
+            logger.warning(f"Could not load company LinkedIn map: {exc}")
+            company_linkedin = {}
+        try:
+            sheet_store.append_rows(rows_to_append, company_linkedin=company_linkedin)
         except Exception as exc:
             logger.exception(f"Failed to append to Google Sheets: {exc!r}")
             sys.exit(1)
 
     logger.info(
-        f"Pipeline complete. Total records: {len(merged_df)} "
-        f"in '{config['output_file']}'"
+        f"Pipeline complete. Total records: {len(merged_df)} in '{output_csv}'"
     )
 
 
@@ -200,8 +235,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Job scraping pipeline")
     parser.add_argument(
         "--config",
-        default="config.json",
-        help="Path to JSON config file (default: config.json)",
+        default="config.yaml",
+        help="Path to YAML or JSON config file (default: config.yaml)",
     )
     return parser.parse_args()
 
