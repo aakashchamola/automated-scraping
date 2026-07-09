@@ -18,6 +18,11 @@ jobs.csv
 # Logs
 logs/
 
+# Visa slot monitor runtime artifacts
+*.session
+*.session-journal
+visa_slot_monitor/siren.wav
+
 # OS
 .DS_Store
 Thumbs.db
