@@ -16,7 +16,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import os
 import subprocess
@@ -24,6 +23,7 @@ import sys
 import time
 
 import alerts
+import config_util
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _TARGETS = {
@@ -43,8 +43,7 @@ def main() -> None:
     ap.add_argument("--config", default=os.path.join(_MODULE_DIR, "config.json"))
     args = ap.parse_args()
 
-    with open(args.config, encoding="utf-8") as fh:
-        cfg = json.load(fh)
+    cfg = config_util.load_config(args.config)
     raw = args.target or cfg.get("monitoring", {}).get("preferred_entry", "monitor")
     names = sorted(_TARGETS) if raw.strip() == "all" else [t.strip() for t in raw.split(",") if t.strip()]
     unknown = [n for n in names if n not in _TARGETS]

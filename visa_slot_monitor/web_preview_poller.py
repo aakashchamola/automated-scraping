@@ -25,6 +25,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
+import config_util
 import dispatcher
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,8 +81,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="No-login visa slot monitor (web preview polling)")
     ap.add_argument("--config", default=os.path.join(_MODULE_DIR, "config.json"))
     args = ap.parse_args()
-    with open(args.config, encoding="utf-8") as fh:
-        cfg = json.load(fh)
+    cfg = config_util.load_config(args.config)
 
     channels = cfg["telegram"]["channels"]
     interval = cfg.get("web_preview_poll", {}).get("interval_seconds", 45)

@@ -56,9 +56,15 @@ cd visa_slot_monitor
 
 That creates a venv, installs dependencies, runs the interactive
 `setup_wizard.py` on first use (Telegram credentials, phone alert topic,
-test alert), then starts the supervised monitor. Hand
-[QUICKSTART.md](QUICKSTART.md) to whoever operates it. The manual
-equivalent is below.
+test alert), then starts the supervised monitor. The manual equivalent is
+below.
+
+Docs map: [QUICKSTART.md](QUICKSTART.md) (operator setup) ·
+[RUN_AND_TEST.md](RUN_AND_TEST.md) (run/test/troubleshoot + example
+messages) · [DEPLOYMENT.md](DEPLOYMENT.md) (laptop/Termux/Pi/Docker/systemd) ·
+[BOOKING_PLAYBOOK.md](BOOKING_PLAYBOOK.md) (human response drill) ·
+[PROBLEM_AND_PROGRESS.md](PROBLEM_AND_PROGRESS.md) (project brief).
+`config.sample.json` is a pristine reference copy of the config.
 
 ---
 
@@ -157,7 +163,21 @@ All in `config.json` → `filter`:
 
 `alerts.cooldown_seconds` (default 180): when the same consulate is posted
 across several groups within the window, you get one siren; the repeats
-arrive as quiet pushes so your phone isn't a continuous alarm.
+arrive as quiet pushes so your phone isn't a continuous alarm. Cooldown and
+template-suppression state persist in `logs/dispatcher_state.json`, shared
+by all source processes — one slot seen by Telegram AND Reddit is still one
+siren, and restarts don't re-alarm.
+
+**Scoring** (`sources` in config): each alert's score = parser confidence
+(high 2 / medium 1) + source trust (`sources.reputation`, 1–3, matched by
+substring against the source name). Siren requires score ≥
+`sources.min_urgent_score` (default 3); below that it's a quiet push. Rank
+new channels by adding them to the reputation map.
+
+**Extra alert channels** (both optional, off by default): `alerts.telegram_bot`
+mirrors alerts to a Telegram chat via a @BotFather bot; `alerts.email` sends
+an email backup via SMTP (e.g. Gmail app password), by default for urgent
+alerts only.
 
 Every fired alert is appended to `logs/alerts_history.csv` — after a few
 days this doubles as a dataset of *when* slots tend to open (day of week,

@@ -10,7 +10,8 @@ confidence messages trigger the alarm (config: filter.alert_on_uncertain).
 import re
 
 # Indian/intl phone number in the text — near-certain broker ad
-_PHONE = re.compile(r"\b\d{10,13}\b")
+# (lookarounds, not \b: must also match digit runs glued to words)
+_PHONE = re.compile(r"(?<!\d)\d{10,13}(?!\d)")
 
 # Broker ads advertise every visa category at once; genuine slot
 # notifications are specific. 3+ families mentioned = advertisement.

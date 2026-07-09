@@ -18,6 +18,7 @@ import time
 
 import requests
 
+import config_util
 import dispatcher
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,8 +67,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Reddit slot-post monitor")
     ap.add_argument("--config", default=os.path.join(_MODULE_DIR, "config.json"))
     args = ap.parse_args()
-    with open(args.config, encoding="utf-8") as fh:
-        cfg = json.load(fh)
+    cfg = config_util.load_config(args.config)
 
     reddit_cfg = cfg.get("reddit", {})
     subreddits = reddit_cfg.get("subreddits", ["f1visa", "usvisascheduling"])

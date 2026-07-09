@@ -109,6 +109,48 @@ def play_siren(repeat: int = 4) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+# ── Optional mirrors: Telegram bot + email backup ────────────────────────────
+
+def send_telegram_bot(tb_cfg: dict, title: str, message: str) -> None:
+    """Mirror the alert to a Telegram chat via a bot (create one with
+    @BotFather, get your chat_id from @userinfobot)."""
+    token, chat_id = tb_cfg.get("bot_token", "").strip(), str(tb_cfg.get("chat_id", "")).strip()
+    if not token or not chat_id:
+        logger.warning("telegram_bot enabled but bot_token/chat_id missing — skipping")
+        return
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": f"{title}\n\n{message}"[:4000]},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error(f"telegram bot mirror failed: {exc}")
+
+
+def send_email(em_cfg: dict, title: str, message: str) -> None:
+    """Email backup (e.g. Gmail with an app password). Runs in a background
+    thread because SMTP is slow."""
+    def _run():
+        import smtplib
+        from email.message import EmailMessage
+        try:
+            msg = EmailMessage()
+            msg["Subject"] = title
+            msg["From"] = em_cfg["username"]
+            msg["To"] = ", ".join(em_cfg.get("to") or [em_cfg["username"]])
+            msg.set_content(message)
+            with smtplib.SMTP_SSL(em_cfg.get("smtp_host", "smtp.gmail.com"),
+                                  int(em_cfg.get("smtp_port", 465)), timeout=20) as smtp:
+                smtp.login(em_cfg["username"], em_cfg["app_password"])
+                smtp.send_message(msg)
+        except Exception as exc:
+            logger.error(f"email backup failed: {exc}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 # ── Desktop notification (best effort) ───────────────────────────────────────
 
 def desktop_notify(title: str, message: str) -> None:
@@ -131,6 +173,12 @@ def fire(alerts_cfg: dict, title: str, message: str, urgent: bool = True) -> Non
     ntfy_cfg = alerts_cfg.get("ntfy", {})
     if ntfy_cfg.get("enabled"):
         send_ntfy(ntfy_cfg, title, message, urgent=urgent)
+    tb_cfg = alerts_cfg.get("telegram_bot", {})
+    if tb_cfg.get("enabled"):
+        send_telegram_bot(tb_cfg, title, message)
+    em_cfg = alerts_cfg.get("email", {})
+    if em_cfg.get("enabled") and (urgent or not em_cfg.get("urgent_only", True)):
+        send_email(em_cfg, title, message)
     if urgent:
         sound_cfg = alerts_cfg.get("local_sound", {})
         if sound_cfg.get("enabled"):
