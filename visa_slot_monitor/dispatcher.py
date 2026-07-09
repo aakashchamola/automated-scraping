@@ -5,6 +5,7 @@ cooldown, fire alerts, and append to the history CSV.
 """
 
 import csv
+import hashlib
 import logging
 import os
 import time
@@ -21,6 +22,25 @@ _HISTORY_CSV = os.path.join(_LOG_DIR, "alerts_history.csv")
 
 # consulate name (or "unknown") -> unix time of last urgent alarm
 _last_alarm: dict[str, float] = {}
+
+# normalized-text hash -> [timestamps]; ad templates repeat verbatim many
+# times a day, genuine notifications differ (date/count changes each time)
+_template_seen: dict[str, list[float]] = {}
+_TEMPLATE_WINDOW = 86400  # 24h
+_TEMPLATE_MAX_REPEATS = 2  # 3rd identical message within the window is spam
+
+
+def _is_repeated_template(text: str) -> bool:
+    key = hashlib.sha1(" ".join(text.lower().split()).encode()).hexdigest()
+    now = time.time()
+    hits = [t for t in _template_seen.get(key, []) if now - t < _TEMPLATE_WINDOW]
+    hits.append(now)
+    _template_seen[key] = hits
+    if len(_template_seen) > 5000:  # bound memory on long runs
+        oldest = sorted(_template_seen, key=lambda k: _template_seen[k][-1])[:1000]
+        for k in oldest:
+            del _template_seen[k]
+    return len(hits) > _TEMPLATE_MAX_REPEATS
 
 
 def _append_history(row: list[str]) -> None:
@@ -42,6 +62,9 @@ def process_message(cfg: dict, channel: str, text: str) -> bool:
     if detection["confidence"] == "medium" and not cfg["filter"].get("alert_on_uncertain", True):
         logger.info(f"[{channel}] medium-confidence message skipped: {text[:120]!r}")
         return False
+    if _is_repeated_template(text):
+        logger.info(f"[{channel}] repeated ad template suppressed: {text[:120]!r}")
+        return False
 
     consulates = detection["consulates"] or ["unknown"]
     dates = detection["dates"]
@@ -57,7 +80,7 @@ def process_message(cfg: dict, channel: str, text: str) -> bool:
 
     place = ", ".join(consulates).upper()
     title = f"VISA SLOT: {place}" if place != "UNKNOWN" else "VISA SLOT (location unclear)"
-    body_lines = [f"Source: t.me/{channel}"]
+    body_lines = [f"Source: {channel}"]
     if dates:
         body_lines.append(f"Dates mentioned: {', '.join(dates)}")
     if detection["visa_types"]:

@@ -19,10 +19,15 @@
         "visa_keywords": ["f1", "f-1", "student", "b1", "b2", "b1/b2"],
         "consulates": ["delhi", "new delhi", "mumbai", "chennai", "hyderabad", "kolkata"],
         "block_keywords": [
-            "dm me", "dm for", "paid service", "payment", "charges",
-            "promo", "advertisement", "sponsored", "http://bit.ly"
+            "dm me", "dm for", "dm to", "paid service", "payment", "charges",
+            "promo", "advertisement", "sponsored", "http://bit.ly",
+            "ping me", "inbox me", "reach out", "contact on", "contact me",
+            "we offer", "no advance", "confirmation within", "fast confirmation",
+            "low cost", "low charges", "genuine", "guaranteed", "whatsapp",
+            "recommend", "helped me", "booked my", "assistance",
+            "usdt", "margin mode", "stop loss", "take-profit"
         ],
-        "alert_on_uncertain": true
+        "alert_on_uncertain": false
     },
     "alerts": {
         "ntfy": {
@@ -44,8 +49,12 @@
     "web_preview_poll": {
         "interval_seconds": 45
     },
+    "reddit": {
+        "subreddits": ["f1visa", "usvisascheduling"],
+        "interval_seconds": 90
+    },
     "monitoring": {
-        "preferred_entry": "monitor",
+        "preferred_entry": "monitor,reddit",
         "startup_push": true,
         "heartbeat_hours": 24,
         "stale_feed_warning_hours": 8

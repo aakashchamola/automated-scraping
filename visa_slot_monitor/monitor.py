@@ -125,7 +125,7 @@ def main() -> None:
         text = event.raw_text or ""
         logger.debug(f"[{channel}] {text[:150]!r}")
         try:
-            dispatcher.process_message(cfg, channel, text)
+            dispatcher.process_message(cfg, f"t.me/{channel}", text)
         except Exception:
             logger.exception("failed to process message")
 

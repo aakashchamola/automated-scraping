@@ -49,7 +49,10 @@ def main() -> None:
     mode = ""
     while mode not in ("1", "2"):
         mode = ask("Choose 1 or 2", "1")
-    cfg.setdefault("monitoring", {})["preferred_entry"] = "monitor" if mode == "1" else "poller"
+    # Reddit runs alongside either mode as a free redundant source
+    cfg.setdefault("monitoring", {})["preferred_entry"] = (
+        "monitor,reddit" if mode == "1" else "poller,reddit"
+    )
 
     if mode == "1":
         print(

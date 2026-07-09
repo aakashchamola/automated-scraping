@@ -9,6 +9,20 @@ confidence messages trigger the alarm (config: filter.alert_on_uncertain).
 
 import re
 
+# Indian/intl phone number in the text — near-certain broker ad
+_PHONE = re.compile(r"\b\d{10,13}\b")
+
+# Broker ads advertise every visa category at once; genuine slot
+# notifications are specific. 3+ families mentioned = advertisement.
+_VISA_FAMILIES = (
+    ("f1", "f-1", "f2", "f1/f2"),
+    ("b1", "b2", "b1/b2"),
+    ("h1b", "h4", "h1b/h4"),
+    ("l1", "l2", "l1/l2"),
+    ("j1", "j2", "j1/j2"),
+    ("m1", "m2", "m1/m2"),
+)
+
 # dd/mm, dd-mm-yyyy, dd.mm.yy ...
 _NUMERIC_DATE = re.compile(r"\b\d{1,2}[/.\-]\d{1,2}(?:[/.\-]\d{2,4})?\b")
 # "14 Aug", "Aug 14", "14th September"
@@ -35,6 +49,11 @@ def classify(text: str, filter_cfg: dict) -> dict | None:
     lowered = text.lower()
 
     if _find_all(lowered, filter_cfg.get("block_keywords", [])):
+        return None
+    if _PHONE.search(lowered.replace(" ", "")):
+        return None
+    families = sum(1 for fam in _VISA_FAMILIES if any(v in lowered for v in fam))
+    if families >= 3:
         return None
 
     slot_hits = _find_all(lowered, filter_cfg.get("slot_keywords", []))

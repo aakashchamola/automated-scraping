@@ -100,13 +100,20 @@ python alerts.py --test     # phone should buzz loudly + laptop siren plays
 ### 5. Run
 
 ```bash
-python run_forever.py             # supervised (recommended): auto-restarts, crash alerts
-python run_forever.py --target poller   # supervised no-login fallback
+python run_forever.py             # supervised (recommended); runs ALL configured
+                                  # sources simultaneously (default: monitor + reddit)
+python run_forever.py --target monitor,reddit   # explicit source list
+python run_forever.py --target all
 
 # bare entry points, without the supervisor:
-python monitor.py                 # primary: real-time
-python web_preview_poller.py      # fallback: polls every 45s, no account
+python monitor.py                 # Telegram real-time (primary)
+python reddit_source.py           # Reddit r/f1visa + r/usvisascheduling polling
+python web_preview_poller.py      # t.me/s/ polling, no account
 ```
+
+Sources run as independent supervised processes and all feed the same
+parser → dedupe → alarm pipeline, so adding a source never doubles the
+sirens (per-consulate cooldown handles cross-source duplicates).
 
 > **Note (verified July 2026):** the default slot-tracker channels have
 > their public web preview disabled — `t.me/s/<channel>` shows only a

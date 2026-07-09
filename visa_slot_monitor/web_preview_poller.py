@@ -115,7 +115,7 @@ def main() -> None:
                 # First pass just baselines history — don't alarm on old posts
                 if not first_pass[channel]:
                     try:
-                        dispatcher.process_message(cfg, channel, text)
+                        dispatcher.process_message(cfg, f"t.me/{channel}", text)
                     except Exception:
                         logger.exception("failed to process message")
             first_pass[channel] = False
