@@ -13,16 +13,19 @@ with the consulate and dates, and tapping the alert opens the booking portal.
 Needs Python 3.10+ installed (`python3 --version` to check).
 
 ```bash
-git clone https://github.com/aakashchamola/automated-scraping.git
+git clone -b visaSlot-auto https://github.com/aakashchamola/automated-scraping.git
 cd automated-scraping/visa_slot_monitor
 ./start.sh          # Windows: start.bat
 ```
 
 The wizard walks you through the rest:
 
-- **Real-time mode** (recommended): it asks for `api_id` / `api_hash` —
-  get them free at https://my.telegram.org → *API development tools*.
-  Also **join the watched channels** from your Telegram app.
+- **Pick real-time mode (option 1).** The slot-tracker channels have their
+  public web preview disabled, so the no-login fallback can't see them —
+  real-time mode is the only mode that works for them. It asks for
+  `api_id` / `api_hash` — get them free at https://my.telegram.org →
+  *API development tools*. Also **join the watched channels** from your
+  Telegram app.
 - **Phone alerts**: it suggests a random topic name — subscribe to exactly
   that name in the ntfy app. Android: long-press the topic → notification
   settings → **max priority, loud sound, override Do Not Disturb**.

@@ -7,8 +7,10 @@ when you can't create Telegram API credentials, or to run on a phone via
 Termux. Trade-offs vs monitor.py:
 
   * ~interval_seconds of extra latency (default 45s) instead of instant push
-  * some channels disable the web preview entirely — those silently yield
-    nothing here; check https://t.me/s/<channel> in a browser to verify
+  * some channels disable the web preview entirely — verified July 2026:
+    the default slot-tracker channels in config.json have it DISABLED, so
+    this poller cannot see them and monitor.py is the required path for
+    them. The poller warns loudly per channel when the preview is empty.
 
 Run:
     python web_preview_poller.py
@@ -86,6 +88,7 @@ def main() -> None:
     seen = load_seen()
     session = requests.Session()
     first_pass = {ch: ch not in seen for ch in channels}
+    warned_empty: set[str] = set()
 
     logger.info(f"Polling {len(channels)} channels every {interval}s: {', '.join(channels)}")
     while True:
@@ -96,7 +99,12 @@ def main() -> None:
                 logger.warning(f"[{channel}] fetch failed: {exc}")
                 continue
             if not messages:
-                logger.debug(f"[{channel}] no messages (web preview may be disabled)")
+                if channel not in warned_empty:
+                    warned_empty.add(channel)
+                    logger.warning(
+                        f"[{channel}] web preview is empty/disabled — this channel "
+                        "CANNOT be monitored here. Use monitor.py (real-time mode) for it."
+                    )
                 continue
             known = set(seen.setdefault(channel, []))
             for msg_id, text in messages:

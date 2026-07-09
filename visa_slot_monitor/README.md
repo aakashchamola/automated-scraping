@@ -18,8 +18,10 @@ reliable play is instant notification + fast manual booking.
 ```
 Telegram channels (public slot-tracker groups)
         │
-        ├── monitor.py              ← real-time push via your Telegram account (primary)
-        └── web_preview_poller.py   ← polls t.me/s/<channel>, no account needed (fallback)
+        ├── monitor.py              ← real-time push via your Telegram account (REQUIRED
+        │                             for the default channels — see note below)
+        └── web_preview_poller.py   ← polls t.me/s/<channel>, no account needed; only
+                                      works for channels with web preview enabled
         │
         ▼
 slot_parser.py    keyword + consulate + date detection, spam filtering
@@ -105,6 +107,27 @@ python run_forever.py --target poller   # supervised no-login fallback
 python monitor.py                 # primary: real-time
 python web_preview_poller.py      # fallback: polls every 45s, no account
 ```
+
+> **Note (verified July 2026):** the default slot-tracker channels have
+> their public web preview disabled — `t.me/s/<channel>` shows only a
+> join prompt. The poller therefore cannot monitor them; use the
+> real-time mode. The poller remains for any additional channels that do
+> keep their preview enabled, and it warns per channel when it can't see
+> one.
+
+### Tuning against real channel history
+
+Export a channel's history from Telegram Desktop (channel → ⋮ → *Export
+chat history* → JSON or HTML) and replay it:
+
+```bash
+python backtest.py path/to/result.json
+```
+
+It reports what would have sirened, what was blocked as spam, and
+**near-misses** (consulate/date mentioned but no slot keyword matched) —
+tune `filter.*` in config.json from that report. Full per-message verdicts
+land in `logs/backtest_results.csv`.
 
 Keep the laptop awake (disable sleep) or run it on any always-on box — a
 Raspberry Pi or the cheapest VPS works; the phone still gets the push via

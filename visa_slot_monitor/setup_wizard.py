@@ -41,8 +41,10 @@ def main() -> None:
         "\nHow should Telegram be watched?\n"
         "  1) Real-time (recommended) — instant alerts; needs free API\n"
         "     credentials from https://my.telegram.org + one OTP login\n"
-        "  2) No-login — polls public channel pages every ~45s;\n"
-        "     nothing to sign up for, slightly slower"
+        "  2) No-login — polls public channel preview pages every ~45s.\n"
+        "     WARNING: the default slot-tracker channels have the web\n"
+        "     preview DISABLED, so option 2 cannot see them. Only pick 2\n"
+        "     if you've verified https://t.me/s/<channel> shows messages."
     )
     mode = ""
     while mode not in ("1", "2"):
