@@ -42,6 +42,10 @@ def send_ntfy(ntfy_cfg: dict, title: str, message: str, urgent: bool = True) -> 
         "Priority": ntfy_cfg.get("priority", "urgent") if urgent else "default",
         "Tags": "rotating_light,us" if urgent else "information_source",
     }
+    # Tapping the notification jumps straight to the booking portal
+    click_url = ntfy_cfg.get("click_url", "").strip()
+    if click_url:
+        headers["Click"] = click_url
     try:
         resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
         resp.raise_for_status()

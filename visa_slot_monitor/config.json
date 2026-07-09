@@ -29,7 +29,8 @@
             "enabled": true,
             "server": "https://ntfy.sh",
             "topic": "",
-            "priority": "urgent"
+            "priority": "urgent",
+            "click_url": "https://www.usvisascheduling.com/"
         },
         "local_sound": {
             "enabled": true,
@@ -42,5 +43,11 @@
     },
     "web_preview_poll": {
         "interval_seconds": 45
+    },
+    "monitoring": {
+        "preferred_entry": "monitor",
+        "startup_push": true,
+        "heartbeat_hours": 24,
+        "stale_feed_warning_hours": 8
     }
 }

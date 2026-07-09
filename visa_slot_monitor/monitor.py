@@ -18,13 +18,16 @@ Run:
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import sys
+import time
 
 from telethon import TelegramClient, events
 
+import alerts
 import dispatcher
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +56,54 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+async def _watchdog_loop(cfg: dict, state: dict) -> None:
+    """Liveness signals so a silently dead monitor never goes unnoticed:
+    startup push, periodic heartbeat, and a warning when no channel traffic
+    has been seen for suspiciously long (all channels quiet for hours
+    usually means a dropped connection, not a quiet day)."""
+    mon = cfg.get("monitoring", {})
+    heartbeat_secs = mon.get("heartbeat_hours", 24) * 3600
+    stale_secs = mon.get("stale_feed_warning_hours", 8) * 3600
+
+    if mon.get("startup_push", True):
+        alerts.fire(
+            cfg["alerts"],
+            "Visa monitor online",
+            f"Watching {len(cfg['telegram']['channels'])} channels. You will hear the siren when a slot opens.",
+            urgent=False,
+        )
+
+    last_heartbeat = time.time()
+    stale_warned = False
+    while True:
+        await asyncio.sleep(300)
+        now = time.time()
+
+        if heartbeat_secs > 0 and now - last_heartbeat >= heartbeat_secs:
+            alerts.fire(
+                cfg["alerts"],
+                "Visa monitor heartbeat",
+                f"Still running. {state['count']} channel messages seen since last heartbeat.",
+                urgent=False,
+            )
+            state["count"] = 0
+            last_heartbeat = now
+
+        if stale_secs > 0:
+            quiet_for = now - state["last_msg"]
+            if quiet_for >= stale_secs and not stale_warned:
+                alerts.fire(
+                    cfg["alerts"],
+                    "Visa monitor: feed looks stale",
+                    f"No messages from ANY channel in {quiet_for / 3600:.1f}h. "
+                    "Check the internet connection and that the account is still in the groups.",
+                    urgent=False,
+                )
+                stale_warned = True
+            elif quiet_for < stale_secs:
+                stale_warned = False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Real-time visa slot monitor")
     ap.add_argument("--config", default=os.path.join(_MODULE_DIR, "config.json"))
@@ -63,9 +114,12 @@ def main() -> None:
     session_path = os.path.join(_MODULE_DIR, tg.get("session_name", "visa_monitor"))
     client = TelegramClient(session_path, int(tg["api_id"]), tg["api_hash"])
     channels = tg["channels"]
+    state = {"last_msg": time.time(), "count": 0}
 
     @client.on(events.NewMessage(chats=channels))
     async def on_message(event):
+        state["last_msg"] = time.time()
+        state["count"] += 1
         chat = await event.get_chat()
         channel = getattr(chat, "username", None) or getattr(chat, "title", "?")
         text = event.raw_text or ""
@@ -78,6 +132,7 @@ def main() -> None:
     logger.info(f"Watching {len(channels)} channels: {', '.join(channels)}")
     logger.info("Alarm test: python alerts.py --test")
     with client:
+        client.loop.create_task(_watchdog_loop(cfg, state))
         client.run_until_disconnected()
 
 

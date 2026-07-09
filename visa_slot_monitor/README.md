@@ -37,9 +37,30 @@ Everything is configured in `config.json`. The pre-loaded channels are the
 ones from our research; add more under `telegram.channels` (username only,
 without `t.me/`).
 
+Around the core sits the reliability layer: `run_forever.py` supervises the
+process (auto-restart with backoff, crash pushes to your phone), and
+`monitor.py` sends a startup push, a daily heartbeat, and a warning if all
+channels go silent for hours (usually a dropped connection). A dead monitor
+you still trust is the failure mode this exists to prevent.
+
 ---
 
-## Setup (~15 minutes)
+## Fast path
+
+```bash
+cd visa_slot_monitor
+./start.sh        # Windows: start.bat
+```
+
+That creates a venv, installs dependencies, runs the interactive
+`setup_wizard.py` on first use (Telegram credentials, phone alert topic,
+test alert), then starts the supervised monitor. Hand
+[QUICKSTART.md](QUICKSTART.md) to whoever operates it. The manual
+equivalent is below.
+
+---
+
+## Setup (~15 minutes, manual)
 
 ### 1. Python side
 
@@ -77,8 +98,11 @@ python alerts.py --test     # phone should buzz loudly + laptop siren plays
 ### 5. Run
 
 ```bash
+python run_forever.py             # supervised (recommended): auto-restarts, crash alerts
+python run_forever.py --target poller   # supervised no-login fallback
+
+# bare entry points, without the supervisor:
 python monitor.py                 # primary: real-time
-# or, if you don't want to create Telegram API credentials:
 python web_preview_poller.py      # fallback: polls every 45s, no account
 ```
 
