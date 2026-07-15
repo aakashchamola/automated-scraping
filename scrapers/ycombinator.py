@@ -1,73 +1,31 @@
 import logging
-import time
-from urllib.parse import urljoin
-
-import requests
-from bs4 import BeautifulSoup
 
 from scrapers import BaseScraper
-from scrapers.http_utils import build_session, get_html
 
 logger = logging.getLogger(__name__)
 
 
 class YCombinatorScraper(BaseScraper):
-    """Best-effort Y Combinator Work at a Startup jobs scraper."""
+    """Y Combinator / Work at a Startup scraper — currently non-functional.
 
-    BASE_URL = "https://www.workatastartup.com/jobs"
+    workatastartup.com is a fully client-side React SPA. All job listings
+    are loaded via JS after the initial page render. The server returns an
+    empty HTML shell — no job data is present for a standard HTTP request.
+
+    A headless browser (Playwright/Selenium) would be required to scrape it.
+
+    Note: YC-backed biotech companies are often already in the Company sheet
+    and their career pages are scraped via career_page.py instead.
+    """
+
+    _BLOCKED_MSG = (
+        "[YCombinator] workatastartup.com is JS-rendered (React SPA) — "
+        "no job data available from plain HTTP requests. Skipping."
+    )
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
-        self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("ycombinator", {})
-        location = str(settings.get("location", "United States")).strip()
-        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
-
-        params = {
-            "query": keyword,
-            "location": location,
-        }
-
-        logger.info(
-            f"[YCombinator] GET {self.BASE_URL} | keyword='{keyword}' | location='{location}'"
-        )
-        try:
-            html = get_html(self._session, self.BASE_URL, self.config, params=params)
-        except requests.exceptions.RequestException as exc:
-            logger.error(f"[YCombinator] Request failed for '{keyword}': {exc}")
-            return []
-
-        jobs = self._parse(html, keyword)
-
-        if delay > 0:
-            time.sleep(delay)
-
-        logger.info(f"[YCombinator] Found {len(jobs)} jobs for '{keyword}'")
-        return jobs
-
-    def _parse(self, html: str, keyword: str) -> list:
-        soup = BeautifulSoup(html, "html.parser")
-        jobs = []
-
-        cards = soup.select("a[href*='/jobs/']")
-        for card in cards:
-            title_text = card.get_text(" ", strip=True)
-            href = card.get("href", "")
-
-            if not href or not title_text:
-                continue
-
-            jobs.append(
-                {
-                    "Company": "",
-                    "Role": title_text,
-                    "Location": "",
-                    "Platform": "Y Combinator",
-                    "Keyword": keyword,
-                    "Job Link": urljoin("https://www.workatastartup.com", href),
-                }
-            )
-
-        return jobs
+        logger.warning(self._BLOCKED_MSG)
+        return []

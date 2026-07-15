@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class InternshalaScraper(BaseScraper):
-    """Best-effort Internshala scraper for internships/jobs search."""
+    """Internshala scraper — keyword-based internship/job search."""
 
     BASE_URL = "https://internshala.com/internships/keywords-{}"
 
@@ -22,7 +22,8 @@ class InternshalaScraper(BaseScraper):
 
     def fetch_jobs(self, keyword: str) -> list:
         delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
-        url = self.BASE_URL.format(quote_plus(keyword.replace(" ", "-")))
+        slug = keyword.lower().replace(" ", "-")
+        url = self.BASE_URL.format(quote_plus(slug))
 
         logger.info(f"[Internshala] GET {url} | keyword='{keyword}'")
         try:
@@ -42,26 +43,26 @@ class InternshalaScraper(BaseScraper):
         soup = BeautifulSoup(html, "html.parser")
         jobs = []
 
-        cards = soup.select("div.individual_internship")
-        for card in cards:
-            title_el = card.select_one("h3.job-internship-name")
+        for card in soup.select("div.individual_internship"):
+            link_el    = card.select_one("a.job-title-href")
             company_el = card.select_one("p.company-name")
-            location_el = card.select_one("p.locations")
-            link_el = card.select_one("a.job-title-href")
+            location_el = card.select_one("div.location_link a") or card.select_one("p.locations")
 
             if not link_el:
                 continue
 
-            href = link_el.get("href", "")
-            jobs.append(
-                {
-                    "Company": company_el.get_text(strip=True) if company_el else "",
-                    "Role": title_el.get_text(strip=True) if title_el else "",
-                    "Location": location_el.get_text(strip=True) if location_el else "",
-                    "Platform": "Internshala",
-                    "Keyword": keyword,
-                    "Job Link": urljoin("https://internshala.com", href) if href else "",
-                }
-            )
+            href  = link_el.get("href", "")
+            title = link_el.get_text(strip=True)  # the link text IS the job title
+            if not title:
+                continue
+
+            jobs.append({
+                "Company":  company_el.get_text(strip=True) if company_el else "",
+                "Role":     title,
+                "Location": location_el.get_text(strip=True) if location_el else "",
+                "Platform": "Internshala",
+                "Keyword":  keyword,
+                "Job Link": urljoin("https://internshala.com", href) if href else "",
+            })
 
         return jobs

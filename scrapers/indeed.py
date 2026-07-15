@@ -31,13 +31,19 @@ _HEADERS = {
 
 
 class IndeedScraper(BaseScraper):
-    """Scraper for Indeed with configurable country/location."""
+    """Scraper for Indeed with configurable country/location.
+
+    Works best from a US residential IP. If Indeed returns 403 it is
+    typically a geo-block or rate-limit; the scraper fails fast for all
+    subsequent keywords in that run.
+    """
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self._base_domain = self._resolve_domain()
         self._base_url = f"https://{self._base_domain}/jobs"
         self._session = self._build_session()
+        self._blocked = False
 
     # ------------------------------------------------------------------
     # Session with automatic retry on transient HTTP errors
@@ -61,6 +67,10 @@ class IndeedScraper(BaseScraper):
     # Public interface
     # ------------------------------------------------------------------
     def fetch_jobs(self, keyword: str) -> list:
+        if self._blocked:
+            logger.debug(f"[Indeed] Skipping '{keyword}' — blocked from this IP")
+            return []
+
         jobs = []
         delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
         location_query = self._location_query()
@@ -85,6 +95,14 @@ class IndeedScraper(BaseScraper):
                     headers=_HEADERS,
                     timeout=self.config.get("http", {}).get("timeout_seconds", 10),
                 )
+                if response.status_code == 403:
+                    self._blocked = True
+                    logger.warning(
+                        "[Indeed] 403 Forbidden — access blocked (geo-restriction or rate limit). "
+                        "Skipping remaining Indeed keywords for this run. "
+                        "Works best from a US residential IP."
+                    )
+                    break
                 response.raise_for_status()
             except requests.exceptions.HTTPError as exc:
                 logger.error(f"[Indeed] HTTP error for '{keyword}': {exc}")
@@ -101,6 +119,9 @@ class IndeedScraper(BaseScraper):
 
             page_jobs = self._parse(response.text, keyword)
             jobs.extend(page_jobs)
+
+            if not page_jobs:
+                break  # no results on this page, stop paginating
 
             if delay > 0:
                 time.sleep(delay)

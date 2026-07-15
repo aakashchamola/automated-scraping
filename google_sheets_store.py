@@ -221,6 +221,87 @@ class GoogleSheetsStore:
         )
         worksheet.update_cell(row, col, value)
 
+    def write_column_values(
+        self,
+        col: int,
+        values: list,
+        worksheet_name: str = None,
+        start_row: int = 2,
+    ) -> None:
+        """Write a whole column in one batched update.
+
+        col       : 1-indexed column number.
+        values    : list of single-element lists, e.g. [["Company"], ["University"]].
+        start_row : 1-indexed first row to write (default 2 = below the header).
+        """
+        if not values:
+            return
+        import gspread
+
+        worksheet = (
+            self.open_worksheet(worksheet_name) if worksheet_name else self._get_worksheet()
+        )
+        end_row = start_row + len(values) - 1
+        rng = f"{gspread.utils.rowcol_to_a1(start_row, col)}:{gspread.utils.rowcol_to_a1(end_row, col)}"
+        worksheet.update(rng, values, value_input_option="RAW")
+        logger.info(f"Wrote {len(values)} cells to column {col} ({rng})")
+
+    def batch_format_cells(
+        self, cell_colors: list, worksheet_name: str = None
+    ) -> None:
+        """Color individual cells in one batchUpdate call.
+
+        cell_colors : list of (1-indexed row_num, 1-indexed col_num, bg_color_dict).
+        """
+        if not cell_colors:
+            return
+
+        worksheet = (
+            self.open_worksheet(worksheet_name) if worksheet_name else self._get_worksheet()
+        )
+
+        try:
+            from googleapiclient.discovery import build
+            from google.oauth2.service_account import Credentials
+        except ImportError:
+            logger.warning("googleapiclient not available; skipping cell formatting")
+            return
+
+        creds_file = self.config.get("credentials_file", "")
+        spreadsheet_id = self.config.get("spreadsheet_id", "")
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
+        sheets_api = build("sheets", "v4", credentials=creds)
+
+        requests_list = []
+        for row_num, col_num, bg_color in cell_colors:
+            requests_list.append({
+                "updateCells": {
+                    "range": {
+                        "sheetId":          worksheet.id,
+                        "startRowIndex":    row_num - 1,
+                        "endRowIndex":      row_num,
+                        "startColumnIndex": col_num - 1,
+                        "endColumnIndex":   col_num,
+                    },
+                    "rows": [{"values": [{"userEnteredFormat": {"backgroundColor": bg_color}}]}],
+                    "fields": "userEnteredFormat.backgroundColor",
+                }
+            })
+
+        CHUNK = 200
+        for i in range(0, len(requests_list), CHUNK):
+            chunk = requests_list[i: i + CHUNK]
+            try:
+                sheets_api.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": chunk},
+                ).execute()
+            except Exception as exc:
+                logger.warning(f"Failed to format cell batch {i}–{i + len(chunk)}: {exc}")
+
+        logger.info(f"Formatted {len(cell_colors)} individual cells")
+
     def batch_format_rows(
         self, row_colors: list, num_cols: int, worksheet_name: str = None
     ) -> None:

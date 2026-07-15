@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--worksheet",
         default=None,
-        help="Worksheet to validate (default: google_sheets.worksheet from config)",
+        help="Jobs worksheet to validate (default: google_sheets.jobs_worksheet from config)",
     )
     parser.add_argument("--url-column", default="Job Link")
     parser.add_argument("--status-column", default="Job Status")
@@ -272,7 +272,7 @@ if __name__ == "__main__":
     gs_config = config.get("google_sheets", {})
 
     if not gs_config.get("enabled"):
-        logger.error("Google Sheets is not enabled in config.json")
+        logger.error("Google Sheets is not enabled in config.yaml")
         sys.exit(1)
 
     worksheet = args.worksheet or gs_config.get("jobs_worksheet", "Jobs")

@@ -295,17 +295,21 @@ def _url_candidates(url: str) -> list:
 
 def _fetch_career_html(url: str, timeout: int):
     """GET the career page, trying URL variants. Returns response or None."""
-    for candidate in _url_candidates(url):
+    candidates = _url_candidates(url)
+    for candidate in candidates:
         try:
             resp = requests.get(
                 candidate, headers=_BROWSER_HEADERS, timeout=timeout, allow_redirects=True
             )
         except requests.RequestException as exc:
-            logger.debug(f"[career] candidate failed {candidate}: {exc}")
+            logger.debug(f"[career] fetch failed {candidate}: {exc}")
             continue
         if resp.status_code == 200:
+            if resp.url != candidate:
+                logger.debug(f"[career] redirected → {resp.url}")
             return resp
-        logger.debug(f"[career] candidate HTTP {resp.status_code}: {candidate}")
+        logger.debug(f"[career] HTTP {resp.status_code}: {candidate}")
+    logger.warning(f"[career] all URL candidates failed for: {url}")
     return None
 
 
@@ -390,19 +394,27 @@ def scrape_companies(
 
     Returns a flat job list. ``keywords`` filters jobs to relevant roles.
     """
+    # Pre-filter to companies that have a usable career page URL
+    workable = [
+        row for row in companies
+        if (row.get(company_col) or "").strip()
+        and normalize_career_url((row.get(career_col) or "").strip())
+    ]
+    skipped = len(companies) - len(workable)
+    logger.info(
+        f"[career] {len(companies)} companies total | "
+        f"{len(workable)} with usable career pages | {skipped} skipped (N/A or blank)"
+    )
+
     all_jobs = []
-    for i, row in enumerate(companies, start=1):
-        company = (row.get(company_col) or "").strip()
-        career_raw = (row.get(career_col) or "").strip()
-        if not company or not career_raw:
-            continue
-        if not normalize_career_url(career_raw):
-            logger.debug(f"[career] row {i}: skip unusable career page {career_raw!r}")
-            continue
-        all_jobs.extend(
-            scrape_career_page(company, career_raw, keywords=keywords, max_jobs=max_jobs)
-        )
-        if delay_sec > 0:
+    for i, row in enumerate(workable, start=1):
+        company = row.get(company_col, "").strip()
+        career_raw = row.get(career_col, "").strip()
+        logger.info(f"[career] [{i}/{len(workable)}] {company!r}  →  {career_raw}")
+        jobs = scrape_career_page(company, career_raw, keywords=keywords, max_jobs=max_jobs)
+        all_jobs.extend(jobs)
+        if delay_sec > 0 and i < len(workable):
             time.sleep(delay_sec)
-    logger.info(f"[career] total keyword-matched postings: {len(all_jobs)}")
+
+    logger.info(f"[career] done — {len(all_jobs)} keyword-matched postings across {len(workable)} companies")
     return all_jobs

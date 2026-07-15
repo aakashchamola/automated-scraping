@@ -43,22 +43,37 @@ scraping:
     column: Search Term                  # column header within that tab
 
   # Active job-board platforms in scrape order.
-  # Remove or comment out any line to skip that platform.
+  # Comment out any line to skip that platform.
+  #
+  # WORKING:
+  #   linkedin    — public guest search API, reliable, 10 jobs/page
+  #   indeed      — public search HTML, works from server IPs
+  #   internshala — public search HTML, works well for research roles
+  #   jobs.lever  — company-specific ATS API; requires lever.sites list below
+  #
+  # BLOCKED (Cloudflare / JS-rendered — do not enable from server IPs):
+  #   glassdoor   — Cloudflare 403
+  #   wellfound   — Cloudflare 403
+  #   simplyhired — Cloudflare 403
+  #   ycombinator — JS-rendered React SPA, no static job data
   platforms:
     - linkedin
     - indeed
-    - glassdoor
-    - jobs.lever
     - internshala
-    - wellfound
-    - ycombinator
-    - simplyhired
+    # - jobs.lever    # enable + add sites list under platform_settings.jobs.lever.sites
+    # - glassdoor     # blocked from server IPs
+    # - wellfound     # blocked from server IPs
+    # - simplyhired   # blocked from server IPs
+    # - ycombinator   # JS-rendered, no accessible job data
 
   # Per-platform tuning. Each key must match a platform name in the list above.
   platform_settings:
     linkedin:
       location: United States
-      max_pages: 1
+      max_pages: 12           # each page = 10 jobs (see page_size); 12 pages = up to 120/keyword
+      page_size: 10           # LinkedIn guest endpoint returns 10 jobs/fetch and treats
+                              # `start` as a row offset — stepping by 10 avoids skipping jobs
+      page_delay_seconds: 2.0 # pause between pages to avoid rate-limiting
 
     indeed:
       country: us
@@ -103,6 +118,23 @@ career_pages:
   max_jobs_per_company: 50           # safety cap: max jobs collected per company per run
 
 
+# ── Pagination / "See More Jobs" Analysis ─────────────────────────────────────
+# Read-only diagnostic (Tasks #4 & #8). Walks LinkedIn's "See More Jobs" guest
+# endpoint page by page per keyword to measure how many jobs lie beyond page 1
+# and how deep the infinite scroll goes. Never writes to the Jobs sheet.
+#   python pagination_analyzer.py --config config.yaml
+pagination_analysis:
+  platform: linkedin           # only linkedin is supported today
+  location: United States
+  page_size: 10                # jobs per "See More Jobs" fetch (LinkedIn returns 10)
+  max_probe_pages: 50          # safety cap: 50 * 10 = up to 500 jobs probed per keyword
+  page_delay_seconds: 1.5      # pause between page fetches (rate-limit politeness)
+  keywords_limit: 0            # 0 = all keywords; >0 = first N only (quick tests)
+  output_csv: logs/pagination_analysis_latest.csv
+  write_to_sheet: false        # true → also write the report to output_worksheet
+  output_worksheet: Pagination_Analysis   # TEST tab (created if missing)
+
+
 # ── Job Validation ────────────────────────────────────────────────────────────
 # Probes every "Job Link" in the jobs sheet and writes one of:
 #   Active   — URL responds 2xx/3xx  (row stays white)
@@ -112,6 +144,23 @@ career_pages:
 job_validation:
   re_validate: false    # false → skip rows that already have a status (fast, saves API calls)
                         # true  → re-check every URL regardless of existing status
+
+
+# ── Organization Classification ───────────────────────────────────────────────
+# Task #5: separate companies, universities, educational institutions, and other
+# organizations. Rule-based (domain TLD + name + optional Industry column). Writes
+# the verdict into output_column and color-codes the row.
+#   python company_classifier.py --config config.yaml
+#   python company_classifier.py --config config.yaml --dry-run
+classification:
+  source_worksheet: CompaniesTest    # TEST tab to classify (Company / Career Page / LinkedIn URL)
+  name_column: Company
+  career_page_column: Career Page    # used for .edu/.gov domain signal (optional)
+  linkedin_url_column: LinkedIn URL  # fallback domain signal (optional)
+  industry_column: Industry          # used only if the tab has this column (e.g. Company tab)
+  output_column: Organization Type   # auto-created if missing
+  write_to_sheet: true               # false (or --dry-run) → classify + log only
+  color_rows: true                   # color each row by category
 
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
@@ -131,9 +180,9 @@ google_sheets:
   company_sheet:
     worksheet: Company
     company_column: Company
-    employee_count_column: Employee-Count   # hyphenated to match actual sheet header
-    career_page_column: Career-Page         # hyphenated to match actual sheet header
-    linkedin_url_column: Linkedin-Url       # hyphenated to match actual sheet header
+    employee_count_column: Avg. Employee-Count  # exact header in the Company tab
+    career_page_column: Career-Page             # hyphenated to match actual sheet header
+    linkedin_url_column: Linkedin-Url           # hyphenated to match actual sheet header
     job_link_column: Job Link
 
     # What this sheet is used for during pipeline runs:

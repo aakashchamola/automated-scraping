@@ -21,37 +21,53 @@ class LinkedInScraper(BaseScraper):
         self._session = build_session(config)
 
     def fetch_jobs(self, keyword: str) -> list:
-        settings = self.config.get("scraping", {}).get("platform_settings", {}).get("linkedin", {})
-        location = str(settings.get("location", "United States")).strip()
-        max_pages = max(1, int(settings.get("max_pages", 1)))
-        delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
+        settings  = self.config.get("scraping", {}).get("platform_settings", {}).get("linkedin", {})
+        location  = str(settings.get("location", "United States")).strip()
+        max_pages = max(1, int(settings.get("max_pages", 5)))
+        # LinkedIn's guest "See More Jobs" endpoint returns ~10 jobs per fetch and
+        # treats `start` as a true row offset. Stepping `start` by anything larger
+        # than the batch size skips the rows in between, so the offset MUST match
+        # the page size (default 10) to collect every job without gaps.
+        page_size = max(1, int(settings.get("page_size", 10)))
+        # Per-page delay (in addition to the global delay_between_requests_seconds)
+        page_delay = float(settings.get("page_delay_seconds", 2.0))
+        global_delay = float(self.config.get("http", {}).get("delay_between_requests_seconds", 0))
 
         jobs = []
         for page in range(max_pages):
+            start = page * page_size
             params = {
                 "keywords": keyword,
                 "location": location,
-                "start": page * 25,
+                "start":    start,
             }
 
             logger.info(
-                f"[LinkedIn] GET {self.BASE_URL} | keyword='{keyword}' | "
-                f"location='{location}' | start={params['start']}"
+                f"[LinkedIn] keyword='{keyword}' | page {page + 1}/{max_pages} | start={start}"
             )
 
             try:
                 html = get_html(self._session, self.BASE_URL, self.config, params=params)
             except requests.exceptions.RequestException as exc:
-                logger.error(f"[LinkedIn] Request failed for '{keyword}': {exc}")
-                continue
+                logger.error(f"[LinkedIn] Request failed for '{keyword}' page {page + 1}: {exc}")
+                break
 
             page_jobs = self._parse(html, keyword)
             jobs.extend(page_jobs)
 
-            if delay > 0:
-                time.sleep(delay)
+            logger.info(f"[LinkedIn] page {page + 1}: {len(page_jobs)} jobs (total so far: {len(jobs)})")
 
-        logger.info(f"[LinkedIn] Found {len(jobs)} jobs for '{keyword}'")
+            # Stop early if the page returned nothing — no more results exist
+            if not page_jobs:
+                logger.info(f"[LinkedIn] Empty page — stopping pagination for '{keyword}'")
+                break
+
+            # Respect both the per-page delay and the global request delay
+            sleep_sec = max(page_delay, global_delay)
+            if sleep_sec > 0 and page < max_pages - 1:
+                time.sleep(sleep_sec)
+
+        logger.info(f"[LinkedIn] '{keyword}': {len(jobs)} total jobs across {min(page + 1, max_pages)} pages")
         return jobs
 
     def _parse(self, html: str, keyword: str) -> list:
