@@ -109,12 +109,13 @@ class ExportTargetTests(unittest.TestCase):
             },
             "scraping": {"keywords_source": {"worksheet": "Keywords"}},
         }
+        # "Settings" leads: the published page renders it as its Settings panel.
         self.assertEqual(export_snapshot._worksheets(cfg),
-                         ["Jobs_Test", "CompaniesTest", "Keywords"])
+                         ["Settings", "Jobs_Test", "CompaniesTest", "Keywords"])
 
     def test_missing_names_are_skipped(self):
         cfg = {"google_sheets": {"jobs_worksheet": "Jobs"}, "scraping": {}}
-        self.assertEqual(export_snapshot._worksheets(cfg), ["Jobs"])
+        self.assertEqual(export_snapshot._worksheets(cfg), ["Settings", "Jobs"])
 
 
 if __name__ == "__main__":

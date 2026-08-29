@@ -34,6 +34,7 @@ def _worksheets(config: dict) -> list:
     sheets = config["google_sheets"]
     scraping = config.get("scraping", {})
     names = [
+        "Settings",                       # the config the published page displays
         sheets.get("jobs_worksheet"),
         sheets.get("enrichment_output_worksheet"),
         sheets.get("company_sheet", {}).get("worksheet"),
@@ -55,7 +56,12 @@ def export(config: dict, out_dir: str) -> dict:
     store = GoogleSheetsStore(config["google_sheets"])
     os.makedirs(out_dir, exist_ok=True)
     captured = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    manifest = {"captured_at": captured, "worksheets": []}
+    manifest = {
+        "captured_at": captured,
+        # Lets the published page link straight to the sheet people edit.
+        "spreadsheet_id": config["google_sheets"].get("spreadsheet_id", ""),
+        "worksheets": [],
+    }
 
     for name in _worksheets(config):
         try:

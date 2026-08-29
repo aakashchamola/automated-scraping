@@ -90,6 +90,7 @@ def run_career_page_scraping(config: dict) -> None:
         company_col=company_col,
         career_col=career_col,
         max_jobs=max_jobs,
+        match_mode=cs.get("keyword_match_mode", "all"),
     )
     if not jobs:
         logger.warning("No keyword-matched jobs found from career pages")

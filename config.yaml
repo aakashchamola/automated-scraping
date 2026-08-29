@@ -117,6 +117,15 @@ career_pages:
   career_page_column: Career-Page    # Column header for career page URL (hyphen as-is in sheet)
   max_jobs_per_company: 50           # safety cap: max jobs collected per company per run
 
+  # How much of a multi-word keyword must appear in a job title.
+  #   all   every word — highest precision (default)
+  #   most  more than half the words
+  #   any   a single word is enough — highest recall, and the most noise
+  # Job-board results are already keyword-filtered by the search itself, so
+  # this only affects career-page scraping, where the company's whole posting
+  # list comes back. A run over 325 companies with "all" kept 9 of thousands.
+  keyword_match_mode: all
+
 
 # ── Pagination / "See More Jobs" Analysis ─────────────────────────────────────
 # Read-only diagnostic (Tasks #4 & #8). Walks LinkedIn's "See More Jobs" guest
@@ -144,6 +153,15 @@ pagination_analysis:
 job_validation:
   re_validate: false    # false → skip rows that already have a status (fast, saves API calls)
                         # true  → re-check every URL regardless of existing status
+
+  # Row removal. Runs only AFTER validation, so it acts on statuses written
+  # moments earlier. Every deleted row is written to logs/removed_rows_*.csv
+  # first — a status is an HTTP probe's judgement, and a site that blocks a
+  # datacenter IP looks exactly like a closed posting.
+  remove_rows: false            # true → delete rows whose status is listed below
+  remove_statuses:              # only used when remove_rows is true
+    - Expired
+    - Removed
 
 
 # ── Organization Classification ───────────────────────────────────────────────

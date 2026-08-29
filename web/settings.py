@@ -111,11 +111,29 @@ SCHEMA = [
     },
     {
         "group": "Job validation",
+        "help": "Probes every job link and writes Active / Expired / Removed / "
+                "Unknown, then optionally deletes the rows it condemned.",
         "fields": [
             {"path": "job_validation.re_validate", "label": "Re-check jobs that already have a status",
              "type": "bool",
              "help": "Off = only fill in blanks (fast). On = re-probe every link, "
                      "which is how an Active job becomes Expired over time."},
+            {"path": "job_validation.remove_rows", "label": "Delete rows after validating",
+             "type": "bool", "danger": True,
+             "help": "Off = statuses are written and rows are only coloured. On = rows "
+                     "with the statuses below are deleted from the sheet after every "
+                     "validation run. Deleted rows are always backed up to a CSV in "
+                     "logs/ first."},
+            {"path": "job_validation.remove_statuses", "label": "Statuses to delete",
+             "type": "multiselect", "danger": True,
+             "options": [
+                 {"value": "Expired", "label": "Expired", "note": "closed / 4xx"},
+                 {"value": "Removed", "label": "Removed", "note": "404 / 410 — gone"},
+                 {"value": "Unknown", "label": "Unknown", "note": "network error — usually keep"},
+                 {"value": "Active", "label": "Active", "note": "live — rarely what you want"},
+             ],
+             "help": "Only used when the switch above is on. Unknown means the probe "
+                     "failed, not that the job did — deleting those loses live jobs."},
         ],
     },
     {
@@ -125,6 +143,12 @@ SCHEMA = [
             {"path": "career_pages.max_jobs_per_company", "label": "Max jobs per company",
              "type": "int", "min": 1, "max": 500,
              "help": "Safety cap so one huge careers site cannot dominate a run."},
+            {"path": "career_pages.keyword_match_mode", "label": "Keyword strictness",
+             "type": "select", "options": ["all", "most", "any"],
+             "help": "How much of a multi-word keyword must appear in the job title. "
+                     "'all' is precise but strict — a run over 325 companies kept 9 "
+                     "postings out of thousands scraped. 'most' loosens it; 'any' "
+                     "matches on one word and brings a lot of noise."},
         ],
     },
     {

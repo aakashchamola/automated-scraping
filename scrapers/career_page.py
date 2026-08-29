@@ -37,17 +37,39 @@ def _keyword_tokens(keyword: str) -> list:
     return [t for t in raw if len(t) >= 3 and t not in _KEYWORD_STOPWORDS]
 
 
-def match_keyword(title: str, keywords: list) -> str:
-    """Return the first keyword whose significant tokens all appear in ``title``.
+def match_keyword(title: str, keywords: list, mode: str = "all") -> str:
+    """Return the first keyword that matches ``title``, or "".
 
-    Word-boundary, case-insensitive. Returns "" when nothing matches.
+    Word-boundary, case-insensitive. ``mode`` decides how much of a multi-word
+    keyword has to appear:
+
+        all   every significant token (default) — highest precision. A search
+              for "Research Assistant Biology" only matches a title carrying
+              all three words.
+        most  more than half the tokens — catches "Research Associate II" for
+              "Research Associate Biotech" without matching everything.
+        any   a single token is enough — highest recall, and on a career page
+              full of unrelated roles that means a lot of noise.
+
+    Job boards are searched by keyword, so their results are already relevant
+    and "all" costs little. Career pages return the company's entire posting
+    list, so the same setting rejects almost everything: a real run over 325
+    companies scraped thousands of postings and kept 9.
     """
     title_l = (title or "").lower()
     for kw in keywords:
         tokens = _keyword_tokens(kw)
         if not tokens:
             continue
-        if all(re.search(rf"\b{re.escape(tok)}", title_l) for tok in tokens):
+        hits = sum(1 for tok in tokens
+                   if re.search(rf"\b{re.escape(tok)}", title_l))
+        if mode == "any":
+            matched = hits >= 1
+        elif mode == "most":
+            matched = hits * 2 > len(tokens)
+        else:
+            matched = hits == len(tokens)
+        if matched:
             return kw
     return ""
 
@@ -394,16 +416,17 @@ def _fetch_career_html(url: str, timeout: int):
     return None
 
 
-def _filter_by_keywords(raw_jobs: list, keywords: list) -> list:
+def _filter_by_keywords(raw_jobs: list, keywords: list, match_mode: str = "all") -> list:
     """Keep only jobs whose Role matches a keyword; tag Keyword with the match.
 
     When ``keywords`` is empty, all jobs are kept (Keyword left as-is).
+    ``match_mode`` is passed through to match_keyword — see its docstring.
     """
     if not keywords:
         return raw_jobs
     kept = []
     for job in raw_jobs:
-        matched = match_keyword(job.get("Role", ""), keywords)
+        matched = match_keyword(job.get("Role", ""), keywords, mode=match_mode)
         if matched:
             job["Keyword"] = matched
             kept.append(job)
@@ -415,6 +438,7 @@ def scrape_career_page(
     career_page_url: str,
     keywords: list = None,
     max_jobs: int = 50,
+    match_mode: str = "all",
     timeout: int = 15,
 ) -> list:
     """Scrape real job postings from a company's career page.
@@ -455,7 +479,7 @@ def scrape_career_page(
         logger.info(f"[career] {company_name!r}: no postings found ({url})")
         return []
 
-    jobs = _filter_by_keywords(raw, keywords or [])[:max_jobs]
+    jobs = _filter_by_keywords(raw, keywords or [], match_mode)[:max_jobs]
     logger.info(
         f"[career] {company_name!r}: {len(jobs)} keyword-matched jobs "
         f"(of {len(raw)} scraped)"
@@ -470,6 +494,7 @@ def scrape_companies(
     career_col: str = "Career-Page",
     delay_sec: float = 2.0,
     max_jobs: int = 50,
+    match_mode: str = "all",
 ) -> list:
     """Scrape keyword-matched jobs from a list of company row-dicts.
 
@@ -492,7 +517,8 @@ def scrape_companies(
         company = row.get(company_col, "").strip()
         career_raw = row.get(career_col, "").strip()
         logger.info(f"[career] [{i}/{len(workable)}] {company!r}  →  {career_raw}")
-        jobs = scrape_career_page(company, career_raw, keywords=keywords, max_jobs=max_jobs)
+        jobs = scrape_career_page(company, career_raw, keywords=keywords,
+                                  max_jobs=max_jobs, match_mode=match_mode)
         all_jobs.extend(jobs)
         if delay_sec > 0 and i < len(workable):
             time.sleep(delay_sec)

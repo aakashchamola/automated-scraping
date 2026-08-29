@@ -373,17 +373,31 @@ $('btn-export').addEventListener('click', () => {
    viewer's existing GitHub session authorises it. */
 const API = `https://api.github.com/repos/${CFG.repo}`;
 
+/* Every option the workflow accepts. The `choice` is the exact value to pick in
+   GitHub's Run workflow dialog, so the card and the dialog cannot drift apart
+   without it being obvious. */
+const AUTOMATIONS = [
+  ['Full pipeline', 'Enrich companies → career pages → job boards → validate links.', 'full', true],
+  ['Job-board scraping', 'Search LinkedIn for every keyword and append new jobs.', 'scrape-only'],
+  ['Career pages', 'Scrape postings straight from company career pages (Greenhouse, Lever, Ashby, Workday).', 'career-pages-only'],
+  ['Company enrichment', 'Fill in employee count, career page and LinkedIn URL.', 'enrich-only'],
+  ['Job validation', 'Re-check every job link and mark it Active / Expired / Removed / Unknown — and delete rows if that is switched on in Settings.', 'validate-only', true],
+  ['Data mismatch flagging', 'Flag cells where the scraped data disagrees with the Company sheet.', 'mismatch-only'],
+  ['Organisation classification', 'Sort every organisation into Company / University / Government / Hospital / Nonprofit / Research.', 'classify-only'],
+  ['Pagination analysis', 'Measure how many jobs sit behind “See More Jobs”. Read-only.', 'pagination-only'],
+  ['Clear stale company rows', 'Remove company rows no longer referenced by Jobs. Dry-run unless confirmed in its config.', 'cleanup-rows'],
+  ['Refresh this dashboard', 'Re-export and republish the data. Writes nothing to the sheet.', 'publish-only'],
+];
+
 function renderRunActions() {
   const grid = $('run-actions');
   grid.innerHTML = '';
-  [
-    ['Full pipeline', 'Enrich → career pages → job boards → validate links.', 'full'],
-    ['Job-board scraping', 'Search LinkedIn for every keyword and append new jobs.', 'scrape-only'],
-    ['Job validation', 'Re-check every job link and update its status.', 'validate-only'],
-    ['Career pages', 'Scrape postings straight from company career pages.', 'career-pages-only'],
-  ].forEach(([label, blurb, choice]) => {
-    const card = el('div', 'task');
-    card.append(el('h3', '', label), el('p', '', blurb));
+  AUTOMATIONS.forEach(([label, blurb, choice, primary]) => {
+    const card = el('div', `task${primary ? ' primary' : ''}`);
+    const h = el('h3', '', label);
+    if (primary) h.append(el('span', 'pill info', 'main'));
+    card.append(h, el('p', '', blurb));
+    card.append(el('div', 'detail', `Run workflow → “Which part of the pipeline to run” → ${choice}`));
     const row = el('div', 'run-row');
     const a = el('a', 'btn primary', 'Run on GitHub ↗');
     a.href = `https://github.com/${CFG.repo}/actions/workflows/${CFG.workflow}`;
@@ -392,6 +406,47 @@ function renderRunActions() {
     row.append(a);
     card.append(row);
     grid.append(card);
+  });
+}
+
+/* ── Settings (read-only) ─────────────────────────────────────────────────
+   The page has no credentials, so it can show the configuration but never
+   change it. The Settings worksheet is where it is edited; this renders what
+   that sheet currently says, grouped the way the sheet groups it. */
+
+function renderSettings() {
+  const host = $('settings-body');
+  host.innerHTML = '';
+  const payload = data.cache.Settings;
+  if (!payload) {
+    host.append(el('p', 'muted',
+      'The last run published no Settings worksheet. Run “Refresh this dashboard”.'));
+    return;
+  }
+  const groups = new Map();
+  payload.rows.forEach((row) => {
+    const g = row.Group || 'Other';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(row);
+  });
+  groups.forEach((rows, group) => {
+    const box = el('div', 'setting-group');
+    box.append(el('h3', '', group));
+    rows.forEach((row) => {
+      const field = el('div', 'field');
+      const lbl = el('div', 'lbl');
+      lbl.append(el('div', 'mono', row.Setting));
+      if (row.Description) lbl.append(el('div', 'help', row.Description));
+      const ctrl = el('div', 'ctrl');
+      const value = (row.Value || '').trim();
+      const shown = el('div', 'mono', value || '(default)');
+      if (!value) shown.classList.add('faint');
+      ctrl.append(shown);
+      if (row.Options) ctrl.append(el('div', 'help', `options: ${row.Options}`));
+      field.append(lbl, ctrl);
+      box.append(field);
+    });
+    host.append(box);
   });
 }
 
@@ -448,13 +503,31 @@ document.querySelectorAll('nav button').forEach((btn) => {
       $(b.dataset.panel).hidden = !on;
     });
     if (btn.dataset.panel === 'panel-runs') loadRuns();
+    if (btn.dataset.panel === 'panel-settings') loadSettings();
   });
 });
+
+async function loadSettings() {
+  banner($('settings-error'), '', '');
+  try {
+    if (!data.cache.Settings) {
+      data.cache.Settings = await fetchEncrypted('Settings', KEY);
+    }
+    renderSettings();
+    const link = $('settings-edit');
+    link.href = `https://docs.google.com/spreadsheets/d/${MANIFEST.spreadsheet_id || ''}`;
+    link.hidden = !MANIFEST.spreadsheet_id;
+  } catch (err) {
+    banner($('settings-error'), 'err', `Could not load Settings: ${err.message}`);
+  }
+}
 
 async function boot() {
   const sel = $('sheet-select');
   sel.innerHTML = '';
-  const usable = (MANIFEST.worksheets || []).filter((w) => !w.error && w.row_count);
+  // Settings has its own panel; it is not a data table.
+  const usable = (MANIFEST.worksheets || [])
+    .filter((w) => !w.error && w.row_count && w.name !== 'Settings');
   usable.forEach((w) => sel.append(new Option(`${w.name} — ${w.row_count} rows`, w.name)));
 
   const captured = new Date(MANIFEST.captured_at);

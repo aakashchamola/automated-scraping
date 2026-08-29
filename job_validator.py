@@ -15,10 +15,13 @@ Usage:
 """
 
 import argparse
+import csv
 import logging
+import os
 import re
 import sys
 import time
+from datetime import datetime
 
 import requests
 
@@ -246,6 +249,62 @@ def validate_jobs(
     return summary
 
 
+def remove_rows_by_status(
+    sheet_store, worksheet: str, status_column: str, statuses: list,
+) -> int:
+    """Delete rows whose status is in *statuses*. Returns how many went.
+
+    Every deleted row is written to a CSV under logs/ first. A status column is
+    a judgement made by an HTTP probe — a site that 403s a datacenter IP looks
+    identical to a closed posting — so the rows have to be recoverable.
+
+    Rows are deleted bottom-up: deleting row 5 renumbers everything below it,
+    so working downwards would delete the wrong rows after the first one.
+    """
+    wanted = {s.strip().lower() for s in statuses if s and s.strip()}
+    if not wanted:
+        logger.info("No statuses selected for removal; nothing to do")
+        return 0
+
+    rows = sheet_store.load_all_rows(worksheet)
+    if len(rows) < 2:
+        return 0
+    header = rows[0]
+    if status_column not in header:
+        logger.warning(f"Status column '{status_column}' missing; nothing removed")
+        return 0
+    status_idx = header.index(status_column)
+
+    doomed = [
+        (num, row) for num, row in enumerate(rows[1:], start=2)
+        if status_idx < len(row) and row[status_idx].strip().lower() in wanted
+    ]
+    if not doomed:
+        logger.info(f"No rows matched {sorted(wanted)}; nothing removed")
+        return 0
+
+    os.makedirs("logs", exist_ok=True)
+    backup = os.path.join(
+        "logs", f"removed_rows_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    with open(backup, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["_sheet_row"] + header)
+        for num, row in doomed:
+            writer.writerow([num] + row)
+    logger.info(f"Backed up {len(doomed)} rows to {backup} before deleting")
+
+    sheet = sheet_store.open_worksheet(worksheet)
+    deleted = 0
+    for num, _ in sorted(doomed, key=lambda pair: pair[0], reverse=True):
+        try:
+            sheet.delete_rows(num)
+            deleted += 1
+        except Exception as exc:
+            logger.error(f"Could not delete row {num}: {exc}")
+    logger.info(f"Removed {deleted} row(s) with status in {sorted(wanted)}")
+    return deleted
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate job postings and write status into Google Sheets"
@@ -261,6 +320,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit", type=int, default=0,
         help="Validate at most N jobs (0 = all). Useful for quick test runs.",
+    )
+    parser.add_argument(
+        "--no-remove", action="store_true", dest="no_remove",
+        help="Validate only; never delete rows even if remove_rows is on.",
     )
     return parser.parse_args()
 
@@ -287,3 +350,16 @@ if __name__ == "__main__":
         limit=args.limit,
         re_validate=re_validate,
     )
+
+    # Optional second pass: delete the rows the statuses just condemned. Off by
+    # default, and it runs only after validation, so what gets deleted is
+    # always judged on statuses written moments earlier rather than stale ones.
+    remove_rows = validation_cfg.get("remove_rows", False)
+    if args.no_remove:
+        remove_rows = False
+    if remove_rows:
+        statuses = validation_cfg.get("remove_statuses") or []
+        logger.info(f"Row removal is ON for statuses: {statuses or '(none selected)'}")
+        remove_rows_by_status(store, worksheet, args.status_column, statuses)
+    else:
+        logger.info("Row removal is off (job_validation.remove_rows)")
