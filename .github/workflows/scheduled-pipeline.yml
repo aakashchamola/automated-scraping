@@ -1,0 +1,114 @@
+# Runs the scraping pipeline on a schedule, on GitHub's free runners, so the
+# sheet keeps filling without anyone's laptop being on.
+#
+# ONE-TIME SETUP — add the Google service-account key as a repository secret:
+#   gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json
+# (Settings → Secrets and variables → Actions does the same thing.)
+#
+# Why some platforms are dropped below: measured from a runner on 2026-08-29
+# (probe-datacenter-ip.yml). From a datacenter IP, LinkedIn's guest API and the
+# Greenhouse/Workday ATS APIs answer normally, but Indeed returns a Cloudflare
+# 403 and Internshala serves a challenge page with a 200 status. Leaving them
+# enabled would spend the whole run collecting nothing and log misleading
+# "0 jobs found" lines, so CI runs without them. Nothing is changed for local
+# runs, where both still work.
+name: Scheduled scrape
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'        # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: Which part of the pipeline to run
+        type: choice
+        default: full
+        options: [full, scrape-only, validate-only, career-pages-only]
+      dry_run:
+        description: Read everything, write nothing to the sheet
+        type: boolean
+        default: false
+
+concurrency:                    # every step writes the same sheet tabs
+  group: pipeline
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Restore the service-account key
+        env:
+          KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::GOOGLE_SERVICE_ACCOUNT secret is not set. Add it with:"
+            echo "::error::  gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json"
+            exit 1
+          fi
+          mkdir -p secrets
+          printf '%s' "$KEY" > secrets/google-service-account.json
+          python -c "import json;json.load(open('secrets/google-service-account.json'))" \
+            || { echo "::error::the secret is not valid JSON"; exit 1; }
+
+      - name: Configure this run
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python - <<'PY'
+          import os
+          from ruamel.yaml import YAML
+
+          yaml = YAML(); yaml.preserve_quotes = True
+          yaml.indent(mapping=2, sequence=4, offset=2)
+          cfg = yaml.load(open("config.yaml"))
+
+          # Drop the platforms that a datacenter IP cannot reach (see header).
+          blocked = {"indeed", "internshala"}
+          keep = [p for p in cfg["scraping"]["platforms"] if p not in blocked]
+          dropped = sorted(set(cfg["scraping"]["platforms"]) - set(keep))
+          cfg["scraping"]["platforms"] = keep
+
+          if os.environ.get("DRY_RUN") == "true":
+              cfg["google_sheets"]["enabled"] = False
+              cfg["classification"]["write_to_sheet"] = False
+
+          yaml.dump(cfg, open("config.yaml", "w"))
+          print("platforms this run :", keep)
+          print("dropped (blocked)  :", dropped or "none")
+          print("writes to sheet    :", cfg["google_sheets"]["enabled"])
+          print("jobs tab           :", cfg["google_sheets"]["jobs_worksheet"])
+          PY
+
+      - name: Run
+        run: |
+          case "${{ inputs.steps || 'full' }}" in
+            scrape-only)        python -u main.py --config config.yaml ;;
+            validate-only)      python -u job_validator.py --config config.yaml ;;
+            career-pages-only)  python -u automation_pipeline.py --config config.yaml \
+                                  --skip-enrichment --skip-keyword-scraping --skip-validation ;;
+            *)                  python -u automation_pipeline.py --config config.yaml ;;
+          esac
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Remove the key from the runner
+        if: always()
+        run: rm -f secrets/google-service-account.json
