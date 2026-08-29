@@ -22,38 +22,151 @@ const banner = (host, kind, msg) => {
 
 const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
+const REMEMBER_DAYS = 10;
+const EXPIRY_KEY = 'dash-key-expires';
+const DB_NAME = 'dashboard-auth';
+const STORE = 'keys';
+
 async function deriveKey(password, kdf) {
   const material = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt: b64(kdf.salt), iterations: kdf.iterations, hash: kdf.hash },
-    material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    material,
+    { name: 'AES-GCM', length: 256 },
+    /* extractable */ false,          // see rememberKey()
+    ['decrypt']);
 }
 
-/* Decrypt one published file. Throws if the password is wrong — the caller
-   treats that as a failed login rather than a corrupt file. */
-async function fetchEncrypted(name, password) {
-  const res = await fetch(`data/${name}.enc.json`, { cache: 'no-cache' });
-  if (!res.ok) throw new Error(`could not load ${name} (HTTP ${res.status})`);
-  const payload = await res.json();
-  const key = await deriveKey(password, payload.kdf);
+/* ── Staying signed in ────────────────────────────────────────────────────
+   The derived CryptoKey is stored, never the password. Marking it
+   non-extractable means the browser will decrypt with it but will not hand its
+   bytes back to any script, so a cached session cannot give up a password the
+   viewer may well have reused somewhere else. IndexedDB is used because it is
+   the only browser store that can hold a live CryptoKey; localStorage would
+   force us to keep the password as text. */
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbPut(key, value) {
+  const db = await idb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function idbGet(key) {
+  const db = await idb();
+  const value = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return value;
+}
+
+async function rememberKey(key) {
+  try {
+    await idbPut('data-key', key);
+    localStorage.setItem(EXPIRY_KEY, String(Date.now() + REMEMBER_DAYS * 864e5));
+  } catch (e) {
+    // Private browsing and blocked site data both land here. Staying signed in
+    // is a convenience; losing it must not stop the page working.
+    console.warn('could not remember this session:', e.name);
+  }
+}
+
+async function recallKey() {
+  try {
+    const expires = Number(localStorage.getItem(EXPIRY_KEY) || 0);
+    if (!expires || Date.now() > expires) {
+      await forgetKey();
+      return null;
+    }
+    return (await idbGet('data-key')) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function forgetKey() {
+  try {
+    localStorage.removeItem(EXPIRY_KEY);
+    await idbPut('data-key', null);
+  } catch { /* nothing to clean up */ }
+}
+
+function remainingDays() {
+  const expires = Number(localStorage.getItem(EXPIRY_KEY) || 0);
+  return expires ? Math.max(0, Math.ceil((expires - Date.now()) / 864e5)) : 0;
+}
+
+/* Decrypt one published file with an already-derived key. Throws if the key is
+   wrong, which the caller treats as a failed or stale login. */
+async function decryptWith(key, payload) {
   const plain = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: b64(payload.cipher.iv) }, key, b64(payload.data));
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
+async function fetchPayload(name) {
+  const res = await fetch(`data/${name}.enc.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`could not load ${name} (HTTP ${res.status})`);
+  return res.json();
+}
+
+async function fetchEncrypted(name, key) {
+  return decryptWith(key, await fetchPayload(name));
+}
+
 /* ── Login gate ─────────────────────────────────────────────────────────── */
 
-let PASSWORD = null;
+let KEY = null;          // the derived CryptoKey; the password is never kept
 let MANIFEST = null;
 
-async function unlock(password) {
-  MANIFEST = await fetchEncrypted('index', password);   // throws on a bad password
-  PASSWORD = password;
-  sessionStorage.setItem('dash-pw', password);          // this tab only
+async function unlock(password, remember) {
+  // Derive from index's salt — every file in a publish shares it, so one
+  // derivation covers the whole dashboard.
+  const payload = await fetchPayload('index');
+  const key = await deriveKey(password, payload.kdf);
+  MANIFEST = await decryptWith(key, payload);           // throws on a bad password
+  KEY = key;
+  if (remember) await rememberKey(key);
   $('gate').hidden = true;
   $('app').hidden = false;
   await boot();
+}
+
+/* Resume a remembered session. A key that no longer decrypts means the
+   password was rotated and the data republished, so the stale key is discarded
+   and the viewer is asked again rather than shown a broken page. */
+async function resume() {
+  const key = await recallKey();
+  if (!key) return false;
+  try {
+    MANIFEST = await fetchEncrypted('index', key);
+    KEY = key;
+    $('gate').hidden = true;
+    $('app').hidden = false;
+    await boot();
+    return true;
+  } catch {
+    await forgetKey();
+    return false;
+  }
 }
 
 $('gate-form').addEventListener('submit', async (e) => {
@@ -64,7 +177,7 @@ $('gate-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Unlocking…';
   err.textContent = '';
   try {
-    await unlock($('gate-pw').value);
+    await unlock($('gate-pw').value, $('gate-remember').checked);
   } catch (ex) {
     err.textContent = ex.name === 'OperationError'
       ? 'Wrong password.'
@@ -76,8 +189,8 @@ $('gate-form').addEventListener('submit', async (e) => {
   }
 });
 
-$('btn-lock').addEventListener('click', () => {
-  sessionStorage.removeItem('dash-pw');
+$('btn-lock').addEventListener('click', async () => {
+  await forgetKey();
   location.reload();
 });
 
@@ -215,7 +328,7 @@ async function loadSheet(worksheet) {
   $('data-count').textContent = 'decrypting…';
   try {
     if (!data.cache[worksheet]) {
-      data.cache[worksheet] = await fetchEncrypted(worksheet, PASSWORD);
+      data.cache[worksheet] = await fetchEncrypted(worksheet, KEY);
     }
     const payload = data.cache[worksheet];
     data.worksheet = worksheet;
@@ -353,12 +466,14 @@ async function boot() {
     ? 'Older than the weekly schedule — a run may have failed.'
     : 'Captured by the most recent successful run.';
 
+  const days = remainingDays();
+  $('btn-lock').title = days
+    ? `Signed in for ${days} more day${days === 1 ? '' : 's'}. Lock to sign out now.`
+    : 'Sign out';
+
   renderRunActions();
   if (usable.length) await loadSheet(usable[0].name);
   else banner($('data-error'), 'warn', 'The last run published no readable worksheets.');
 }
 
-const saved = sessionStorage.getItem('dash-pw');
-if (saved) {
-  unlock(saved).catch(() => sessionStorage.removeItem('dash-pw'));
-}
+resume().catch(() => { /* fall through to the login form */ });

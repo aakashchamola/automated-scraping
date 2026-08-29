@@ -41,10 +41,11 @@ manager = RunManager()
 CREDENTIALS = auth.load_credentials()
 app.config["DASHBOARD_CREDENTIALS"] = CREDENTIALS
 app.secret_key = CREDENTIALS.get("secret_key") or os.urandom(32)
-app.permanent_session_lifetime = timedelta(hours=auth.SESSION_HOURS)
+app.permanent_session_lifetime = timedelta(days=auth.SESSION_DAYS)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,   # a stolen XSS payload cannot read the cookie
     SESSION_COOKIE_SAMESITE="Lax",  # no cross-site form can act as the signed-in user
+    SESSION_REFRESH_EACH_REQUEST=True,  # active use pushes the 10 days out again
 )
 app.register_blueprint(auth.bp)
 

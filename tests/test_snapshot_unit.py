@@ -49,6 +49,44 @@ class EncryptionTests(unittest.TestCase):
         self.assertEqual(payload["cipher"]["name"], "AES-GCM")
         self.assertGreaterEqual(payload["kdf"]["iterations"], 100_000)
 
+    def test_one_publish_shares_a_salt_but_never_an_iv(self):
+        # A shared salt is what lets the browser derive the key once and cache
+        # it as a non-extractable CryptoKey instead of keeping the password.
+        # A shared IV would break AES-GCM, so those must still differ.
+        tmp = tempfile.mkdtemp()
+        for name in ("Jobs", "Companies", "index"):
+            with open(os.path.join(tmp, f"{name}.json"), "w") as fh:
+                json.dump({"worksheet": name}, fh)
+        sys.argv = ["encrypt_snapshot.py", "--in", tmp, "--out", tmp,
+                    "--password", self.PASSWORD]
+        encrypt_snapshot.main()
+
+        payloads = []
+        for name in ("Jobs", "Companies", "index"):
+            with open(os.path.join(tmp, f"{name}.enc.json")) as fh:
+                payloads.append(json.load(fh))
+        salts = {p["kdf"]["salt"] for p in payloads}
+        ivs = {p["cipher"]["iv"] for p in payloads}
+        self.assertEqual(len(salts), 1, "all files in a publish share one salt")
+        self.assertEqual(len(ivs), 3, "every file needs its own IV")
+        for payload in payloads:
+            encrypt_snapshot.decrypt_payload(payload, self.PASSWORD)
+
+    def test_separate_publishes_do_not_reuse_a_salt(self):
+        # Rotating the password must invalidate every cached key, which only
+        # holds if a fresh publish derives a different key.
+        salts = set()
+        for _ in range(2):
+            tmp = tempfile.mkdtemp()
+            with open(os.path.join(tmp, "a.json"), "w") as fh:
+                json.dump({}, fh)
+            sys.argv = ["encrypt_snapshot.py", "--in", tmp, "--out", tmp,
+                        "--password", self.PASSWORD]
+            encrypt_snapshot.main()
+            with open(os.path.join(tmp, "a.enc.json")) as fh:
+                salts.add(json.load(fh)["kdf"]["salt"])
+        self.assertEqual(len(salts), 2)
+
     def test_cli_removes_the_cleartext_it_encrypted(self):
         tmp = tempfile.mkdtemp()
         src = os.path.join(tmp, "Jobs.json")

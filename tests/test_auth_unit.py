@@ -121,6 +121,18 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self._sign_in(password="nope").status_code, 429,
                          "brute-force guessing must be slowed down")
 
+    def test_session_lasts_ten_days(self):
+        from web.app import app
+        self.assertEqual(app.permanent_session_lifetime.days, 10)
+
+    def test_signing_in_marks_the_session_permanent(self):
+        # Without this the cookie is a session cookie and dies with the browser,
+        # so the 10-day lifetime would never actually apply.
+        with self.client:
+            self._sign_in()
+            from flask import session
+            self.assertTrue(session.permanent)
+
     def test_login_will_not_redirect_off_site(self):
         # ?next=https://evil.example must not become an open redirect.
         self.client.post("/login?next=https://evil.example",

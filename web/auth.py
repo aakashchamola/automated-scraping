@@ -29,7 +29,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUTH_FILE = os.path.join(PROJECT_ROOT, ".dashboard-auth.json")
 
-SESSION_HOURS = 12
+SESSION_DAYS = 10         # a signed-in browser is not asked again for this long
 MAX_ATTEMPTS = 8          # per source address, per window
 ATTEMPT_WINDOW = 300      # seconds
 

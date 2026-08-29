@@ -14,6 +14,12 @@ page needs no crypto library:
     PBKDF2-HMAC-SHA256, 200 000 iterations, 16-byte random salt
     AES-256-GCM, 12-byte random IV, 16-byte tag (appended by both sides)
 
+All files in one publish share a salt, with a fresh IV each. That is what lets
+the page derive the key once instead of once per worksheet, and — more usefully
+— cache the derived CryptoKey as non-extractable so "stay signed in" never has
+to keep the password itself. Sharing a salt is safe here because AES-GCM's
+requirement is a unique IV per encryption under a key, not a unique key.
+
 Usage:
     python encrypt_snapshot.py --in site/data --out site/data --password "$DASHBOARD_PASSWORD"
 """
@@ -38,8 +44,8 @@ def derive_key(password: str, salt: bytes) -> bytes:
                                PBKDF2_ITERATIONS, dklen=32)
 
 
-def encrypt_bytes(plaintext: bytes, password: str) -> dict:
-    salt = os.urandom(SALT_BYTES)
+def encrypt_bytes(plaintext: bytes, password: str, salt: bytes = None) -> dict:
+    salt = salt or os.urandom(SALT_BYTES)
     iv = os.urandom(IV_BYTES)
     ciphertext = AESGCM(derive_key(password, salt)).encrypt(iv, plaintext, None)
     b64 = lambda raw: base64.b64encode(raw).decode("ascii")
@@ -73,6 +79,7 @@ def main() -> None:
         sys.exit("password must be at least 8 characters")
 
     os.makedirs(args.dst, exist_ok=True)
+    salt = os.urandom(SALT_BYTES)      # one per publish; see the module docstring
     encrypted = 0
     for path in sorted(glob.glob(os.path.join(args.src, "*.json"))):
         name = os.path.basename(path)
@@ -80,7 +87,7 @@ def main() -> None:
             continue
         with open(path, "rb") as fh:
             plaintext = fh.read()
-        payload = encrypt_bytes(plaintext, args.password)
+        payload = encrypt_bytes(plaintext, args.password, salt=salt)
         out_path = os.path.join(args.dst, name.replace(".json", ".enc.json"))
         with open(out_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"))
