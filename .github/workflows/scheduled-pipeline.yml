@@ -1,0 +1,195 @@
+# Runs the scraping pipeline on a schedule, on GitHub's free runners, so the
+# sheet keeps filling without anyone's laptop being on.
+#
+# ONE-TIME SETUP — add the Google service-account key as a repository secret:
+#   gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json
+# (Settings → Secrets and variables → Actions does the same thing.)
+#
+# Why some platforms are dropped below: measured from a runner on 2026-08-29
+# (probe-datacenter-ip.yml). From a datacenter IP, LinkedIn's guest API and the
+# Greenhouse/Workday ATS APIs answer normally, but Indeed returns a Cloudflare
+# 403 and Internshala serves a challenge page with a 200 status. Leaving them
+# enabled would spend the whole run collecting nothing and log misleading
+# "0 jobs found" lines, so CI runs without them. Nothing is changed for local
+# runs, where both still work.
+name: Scheduled scrape
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'        # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: Which part of the pipeline to run
+        type: choice
+        default: full
+        options: [full, scrape-only, validate-only, career-pages-only]
+      dry_run:
+        description: Read everything, write nothing to the sheet
+        type: boolean
+        default: false
+
+concurrency:                    # every step writes the same sheet tabs
+  group: pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Restore the service-account key
+        env:
+          KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::GOOGLE_SERVICE_ACCOUNT secret is not set. Add it with:"
+            echo "::error::  gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json"
+            exit 1
+          fi
+          mkdir -p secrets
+          printf '%s' "$KEY" > secrets/google-service-account.json
+          python -c "import json;json.load(open('secrets/google-service-account.json'))" \
+            || { echo "::error::the secret is not valid JSON"; exit 1; }
+
+      - name: Configure this run
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python - <<'PY'
+          import os
+          from ruamel.yaml import YAML
+
+          yaml = YAML(); yaml.preserve_quotes = True
+          yaml.indent(mapping=2, sequence=4, offset=2)
+          cfg = yaml.load(open("config.yaml"))
+
+          # Drop the platforms that a datacenter IP cannot reach (see header).
+          blocked = {"indeed", "internshala"}
+          keep = [p for p in cfg["scraping"]["platforms"] if p not in blocked]
+          dropped = sorted(set(cfg["scraping"]["platforms"]) - set(keep))
+          cfg["scraping"]["platforms"] = keep
+
+          if os.environ.get("DRY_RUN") == "true":
+              cfg["google_sheets"]["enabled"] = False
+              cfg["classification"]["write_to_sheet"] = False
+
+          yaml.dump(cfg, open("config.yaml", "w"))
+          print("platforms this run :", keep)
+          print("dropped (blocked)  :", dropped or "none")
+          print("writes to sheet    :", cfg["google_sheets"]["enabled"])
+          print("jobs tab           :", cfg["google_sheets"]["jobs_worksheet"])
+          PY
+
+      - name: Run
+        run: |
+          case "${{ inputs.steps || 'full' }}" in
+            scrape-only)        python -u main.py --config config.yaml ;;
+            validate-only)      python -u job_validator.py --config config.yaml ;;
+            career-pages-only)  python -u automation_pipeline.py --config config.yaml \
+                                  --skip-enrichment --skip-keyword-scraping --skip-validation ;;
+            *)                  python -u automation_pipeline.py --config config.yaml ;;
+          esac
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Remove the key from the runner
+        if: always()
+        run: rm -f secrets/google-service-account.json
+
+  # ── Publish the dashboard ──────────────────────────────────────────────────
+  # Exports the sheet tabs to JSON, encrypts them under DASHBOARD_PASSWORD, and
+  # deploys the static page. The service-account key exists only inside this
+  # job; the only thing that reaches Pages is ciphertext, so a public URL never
+  # exposes the sheet or the key.
+  publish:
+    needs: run
+    if: always() && needs.run.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Check the publishing secrets are set
+        env:
+          KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+          PW: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: |
+          missing=0
+          [ -n "$KEY" ] || { echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; missing=1; }
+          [ -n "$PW" ]  || { echo "::error::DASHBOARD_PASSWORD is not set"; missing=1; }
+          if [ ${#PW} -lt 8 ] && [ -n "$PW" ]; then
+            echo "::error::DASHBOARD_PASSWORD must be at least 8 characters"; missing=1
+          fi
+          [ $missing -eq 0 ] || exit 1
+          mkdir -p secrets && printf '%s' "$KEY" > secrets/google-service-account.json
+
+      - name: Export the sheet tabs
+        run: python -u export_snapshot.py --config config.yaml --out site/data
+
+      - name: Encrypt them
+        env:
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: python -u encrypt_snapshot.py --in site/data --out site/data
+
+      - name: Refuse to publish cleartext
+        # Cheap insurance: if the encrypt step ever changes shape, this stops a
+        # readable copy of the sheet reaching a public URL.
+        run: |
+          if ls site/data/*.json 2>/dev/null | grep -v '\.enc\.json$' | grep -q .; then
+            echo "::error::cleartext JSON found in site/data — refusing to publish"
+            ls -la site/data
+            exit 1
+          fi
+          echo "only ciphertext present:"; ls site/data
+
+      - name: Stamp the build
+        run: |
+          cat > site/config.js <<JS
+          window.DASHBOARD_CONFIG = {
+            repo: "${{ github.repository }}",
+            workflow: "scheduled-pipeline.yml",
+            branch: "${{ github.ref_name }}",
+            builtAt: "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          };
+          JS
+
+      - name: Remove the key before anything is uploaded
+        run: rm -f secrets/google-service-account.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
