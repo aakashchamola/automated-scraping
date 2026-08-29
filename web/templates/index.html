@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job Scraping Automation — Control Panel</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header>
+  <h1>Job Scraping Automation</h1>
+  <nav role="tablist">
+    <button id="tab-data" role="tab" aria-selected="true" data-panel="panel-data">Data</button>
+    <button id="tab-run" role="tab" aria-selected="false" data-panel="panel-run">Run</button>
+    <button id="tab-settings" role="tab" aria-selected="false" data-panel="panel-settings">Settings</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="run-indicator" class="pill neutral">idle</span>
+  <a id="sheet-link" class="faint" href="#" target="k" rel="noopener">open spreadsheet ↗</a>
+</header>
+
+<main>
+
+  <!-- ── Data ─────────────────────────────────────────────────────────── -->
+  <section id="panel-data" class="panel">
+    <div id="data-error"></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Sheet data</h2>
+        <div class="filter-group">
+          <label for="sheet-select">Worksheet</label>
+          <select id="sheet-select"></select>
+        </div>
+        <span class="spacer" style="flex:1"></span>
+        <span id="data-count" class="faint"></span>
+        <button id="btn-refresh" class="btn sm">Refresh</button>
+        <button id="btn-export" class="btn sm">Export CSV</button>
+      </div>
+      <div class="card-body">
+        <div class="filters">
+          <input type="text" id="search" placeholder="Search all columns…" autocomplete="off">
+          <div id="facets" class="filters"></div>
+          <button id="btn-clear" class="btn sm">Clear filters</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="data-table">
+          <thead><tr id="data-head"></tr></thead>
+          <tbody id="data-body"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button id="page-prev" class="btn sm">‹ Prev</button>
+        <span id="page-info" class="faint"></span>
+        <button id="page-next" class="btn sm">Next ›</button>
+        <span class="spacer"></span>
+        <label class="faint">Rows per page
+          <select id="page-size">
+            <option>50</option><option selected>100</option><option>250</option><option>500</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Run ──────────────────────────────────────────────────────────── -->
+  <section id="panel-run" class="panel" hidden>
+    <div id="run-error"></div>
+    <div class="card">
+      <div class="card-head"><h2>Automations</h2>
+        <span class="faint">Each one runs the same command as the terminal — the log below is its real output.</span>
+      </div>
+      <div class="card-body"><div id="task-grid" class="task-grid"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Live log</h2>
+        <div id="run-meta" class="run-meta faint">no run yet</div>
+        <span class="spacer" style="flex:1"></span>
+        <label class="faint switch"><input type="checkbox" id="autoscroll" checked> Follow</label>
+        <button id="btn-stop" class="btn sm danger" disabled>Stop run</button>
+        <button id="btn-clear-log" class="btn sm">Clear</button>
+      </div>
+      <div class="card-body">
+        <div id="console" class="console"><span class="empty">Pick an automation above and press Run — its output streams here line by line.</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Recent runs</h2></div>
+      <div class="table-wrap" style="max-height:34vh">
+        <table><thead><tr>
+          <th>Started</th><th>Automation</th><th>Status</th><th>Duration</th><th>Lines</th><th>Command</th>
+        </tr></thead><tbody id="history-body"></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Settings ─────────────────────────────────────────────────────── -->
+  <section id="panel-settings" class="panel" hidden>
+    <div id="settings-error"></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Settings</h2>
+        <span class="faint">Every control writes to <span class="mono" id="config-path">config.yaml</span> —
+          the same file the command line reads. Comments in the file are preserved.</span>
+      </div>
+      <div id="settings-groups"></div>
+      <div class="savebar">
+        <button id="btn-save" class="btn primary" disabled>Save changes</button>
+        <button id="btn-revert" class="btn" disabled>Discard</button>
+        <span id="save-status" class="faint"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

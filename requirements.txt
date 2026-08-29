@@ -6,3 +6,7 @@ google-auth>=2.30,<3.0
 pandas>=2.0,<3.0
 requests>=2.31,<3.0
 urllib3>=2.0,<3.0
+
+# Dashboard (python -m web.app) — optional; the CLI tools work without these.
+flask>=3.0,<4.0
+ruamel.yaml>=0.18,<0.19       # round-trip YAML: edits from the browser keep config.yaml's comments
