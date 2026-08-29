@@ -18,6 +18,12 @@ const banner = (host, kind, msg) => {
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (res.status === 401 || body.login_required) {
+    // The session expired mid-visit. Bounce to the login page rather than
+    // leaving every panel showing a bare "not signed in" error.
+    location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
+    throw new Error('signed out');
+  }
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
   return body;
 }

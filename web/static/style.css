@@ -235,3 +235,28 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
   .field { grid-template-columns: 1fr; gap: 6px; }
   main { padding: 12px; }
 }
+
+/* ── Login gate (static build only) ─────────────────────────────────────── */
+
+/* `hidden` is only display:none in the UA stylesheet, so any class that sets
+   display beats it. Without this the unlocked gate stays on screen as a
+   full-viewport overlay that silently swallows every click. */
+[hidden] { display: none !important; }
+
+.gate {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 24px;
+}
+.gate form {
+  width: min(380px, 100%); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 28px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.gate h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.gate p { margin: 0; font-size: 13.5px; color: var(--text-dim); }
+.gate input { width: 100%; padding: 9px 11px; font-size: 15px; }
+.gate .err { color: var(--err); font-size: 13px; min-height: 1.2em; }
+.gate .lock { font-size: 26px; line-height: 1; }
+.stale { background: var(--warn-soft); color: var(--warn); }

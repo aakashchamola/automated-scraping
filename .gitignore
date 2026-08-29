@@ -25,3 +25,6 @@ Thumbs.db
 secrets
 # Generated snapshots — never commit sheet data, encrypted or not
 site/data/
+
+# Local dashboard login (hash + session key) — never commit
+.dashboard-auth.json

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Job Scraping Automation</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="gate">
+    <form method="post" action="{{ url_for('auth.login', next=next) }}" autocomplete="on">
+      <div class="lock">🔒</div>
+      <h2>Job Scraping Automation</h2>
+      <p>Sign in to browse the data, run the automation and change settings.</p>
+      <input type="text" name="username" placeholder="Username"
+             autocomplete="username" required autofocus>
+      <input type="password" name="password" placeholder="Password"
+             autocomplete="current-password" required>
+      {% if error %}<div class="err">{{ error }}</div>{% else %}<div class="err"></div>{% endif %}
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>

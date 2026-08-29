@@ -21,17 +21,45 @@ import os
 import sys
 import webbrowser
 
+from datetime import timedelta
+
 from flask import Flask, Response, jsonify, render_template, request
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from web import settings, sheets_data                      # noqa: E402
+from web import auth, settings, sheets_data                # noqa: E402
 from web.runner import RunManager                          # noqa: E402
 from web.tasks import TASKS, TASKS_BY_KEY, build_command   # noqa: E402
 
 app = Flask(__name__)
 manager = RunManager()
+
+# Sign-in gate. The Run tab executes commands on this host and secrets/ holds a
+# key with write access to the whole spreadsheet, so every route below is
+# protected — there is no read-only tier to leave open.
+CREDENTIALS = auth.load_credentials()
+app.config["DASHBOARD_CREDENTIALS"] = CREDENTIALS
+app.secret_key = CREDENTIALS.get("secret_key") or os.urandom(32)
+app.permanent_session_lifetime = timedelta(hours=auth.SESSION_HOURS)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,   # a stolen XSS payload cannot read the cookie
+    SESSION_COOKIE_SAMESITE="Lax",  # no cross-site form can act as the signed-in user
+)
+app.register_blueprint(auth.bp)
+
+
+@app.before_request
+def require_sign_in():
+    """One gate for everything except the login screen and its stylesheet."""
+    if request.endpoint in ("auth.login", "auth.logout", "static"):
+        return None
+    if auth.is_logged_in():
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "not signed in", "login_required": True}), 401
+    from flask import redirect, url_for
+    return redirect(url_for("auth.login", next=request.path))
 
 # The venv interpreter running this server — never a bare "python", which on
 # this machine resolves to a different environment without gspread installed.
