@@ -23,11 +23,12 @@ on:
         description: Which part of the pipeline to run
         type: choice
         default: full
-        options: [full, scrape-only, validate-only, career-pages-only]
-      dry_run:
-        description: Read everything, write nothing to the sheet
-        type: boolean
-        default: false
+        options:
+          - publish-only          # touch nothing; just refresh the dashboard
+          - full
+          - scrape-only
+          - validate-only
+          - career-pages-only
 
 concurrency:                    # every step writes the same sheet tabs
   group: pipeline
@@ -67,8 +68,6 @@ jobs:
             || { echo "::error::the secret is not valid JSON"; exit 1; }
 
       - name: Configure this run
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           python - <<'PY'
           import os
@@ -84,10 +83,6 @@ jobs:
           dropped = sorted(set(cfg["scraping"]["platforms"]) - set(keep))
           cfg["scraping"]["platforms"] = keep
 
-          if os.environ.get("DRY_RUN") == "true":
-              cfg["google_sheets"]["enabled"] = False
-              cfg["classification"]["write_to_sheet"] = False
-
           yaml.dump(cfg, open("config.yaml", "w"))
           print("platforms this run :", keep)
           print("dropped (blocked)  :", dropped or "none")
@@ -96,6 +91,7 @@ jobs:
           PY
 
       - name: Run
+        if: inputs.steps != 'publish-only'
         run: |
           case "${{ inputs.steps || 'full' }}" in
             scrape-only)        python -u main.py --config config.yaml ;;
@@ -125,7 +121,7 @@ jobs:
   # exposes the sheet or the key.
   publish:
     needs: run
-    if: always() && needs.run.result != 'cancelled'
+    if: always() && needs.run.result != 'cancelled' && needs.run.result != 'failure'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
