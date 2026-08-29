@@ -23,8 +23,25 @@ import dispatcher    # noqa: E402
 import slot_parser   # noqa: E402
 
 
+def config_path() -> str:
+    """The config file the tests should read.
+
+    Prefers the live config.json but falls back to config.sample.json: the
+    live file holds Telegram credentials and is therefore gitignored, so it
+    does not exist in a fresh clone — and it can be removed by a branch switch
+    or rebase that replays the commit which untracked it. Both files carry
+    identical filter settings, so no test may depend on which one is present.
+    """
+    for name in ("config.json", "config.sample.json"):
+        path = os.path.join(_MODULE_DIR, name)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"neither config.json nor config.sample.json found in {_MODULE_DIR}")
+
+
 def load_cfg() -> dict:
-    with open(os.path.join(_MODULE_DIR, "config.json"), encoding="utf-8") as fh:
+    with open(config_path(), encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -146,7 +163,7 @@ class DispatcherTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_valid_config_loads(self):
-        cfg = config_util.load_config(os.path.join(_MODULE_DIR, "config.json"))
+        cfg = config_util.load_config(config_path())
         self.assertIn("sources", cfg)
         self.assertGreaterEqual(cfg["sources"]["min_urgent_score"], 1)
 
