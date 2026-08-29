@@ -136,6 +136,11 @@ async function fetchEncrypted(name, key) {
 
 let KEY = null;          // the derived CryptoKey; the password is never kept
 let MANIFEST = null;
+/* The Apps Script Web App checks the same shared password. It has to be sent
+   as text, so unlike the data key it cannot be kept as a non-extractable key —
+   it lives in memory for this page load only, and a remembered session
+   (key-only) therefore leaves Settings read-only until the next sign-in. */
+let PASSWORD_FOR_SHEET = null;
 
 async function unlock(password, remember) {
   // Derive from index's salt — every file in a publish shares it, so one
@@ -144,6 +149,7 @@ async function unlock(password, remember) {
   const key = await deriveKey(password, payload.kdf);
   MANIFEST = await decryptWith(key, payload);           // throws on a bad password
   KEY = key;
+  PASSWORD_FOR_SHEET = password;
   if (remember) await rememberKey(key);
   $('gate').hidden = true;
   $('app').hidden = false;
@@ -409,45 +415,217 @@ function renderRunActions() {
   });
 }
 
-/* ── Settings (read-only) ─────────────────────────────────────────────────
-   The page has no credentials, so it can show the configuration but never
-   change it. The Settings worksheet is where it is edited; this renders what
-   that sheet currently says, grouped the way the sheet groups it. */
+/* ── Settings ─────────────────────────────────────────────────────────────
+   The Settings worksheet is the source of truth, and this panel edits it.
+   Saving goes through the Apps Script Web App, because a static page holds no
+   Google credentials. Two constraints shape that exchange, both established
+   the hard way:
+
+     - A Web App's /exec response carries no Access-Control-Allow-Origin, so a
+       normal fetch that reads the response dies. Saves are sent no-cors:
+       fire-and-forget, response unreadable.
+     - Since the save's own answer cannot be read, the panel confirms by
+       reading back over JSONP (a <script> tag), which CORS does not touch.
+
+   So a save is: POST blind, then re-read and show what the sheet actually
+   says. If the read-back disagrees, the user is told the save did not land
+   rather than being shown an optimistic success. */
+
+const SETTINGS_URL = (CFG.settingsWebApp || '').trim();
+let SETTINGS_ROWS = null;
+const pending = {};
+
+function jsonp(url, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const name = `__jsonp_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement('script');
+    const done = (fn) => {
+      delete window[name];
+      script.remove();
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(
+      () => done(() => reject(new Error('the Settings service did not respond'))), timeoutMs);
+    window[name] = (payload) => done(() => resolve(payload));
+    script.onerror = () => done(() => reject(new Error('could not reach the Settings service')));
+    script.src = `${url}${url.includes('?') ? '&' : '?'}callback=${name}`;
+    document.body.append(script);
+  });
+}
+
+async function readLiveSettings() {
+  const payload = await jsonp(
+    `${SETTINGS_URL}?password=${encodeURIComponent(PASSWORD_FOR_SHEET)}`);
+  if (!payload.ok) throw new Error(payload.error || 'the Settings service refused the request');
+  return payload.settings;
+}
+
+function markDirty() {
+  const n = Object.keys(pending).length;
+  $('settings-save').disabled = n === 0;
+  $('settings-discard').disabled = n === 0;
+  $('settings-status').textContent = n ? `${n} unsaved change${n > 1 ? 's' : ''}` : '';
+}
+
+function track(path, value, original, node) {
+  if (String(value) === String(original)) delete pending[path];
+  else pending[path] = String(value);
+  node.classList.toggle('changed', path in pending);
+  markDirty();
+}
+
+function settingControl(row) {
+  const type = (row.Type || 'text').trim();
+  const original = (row.Value || '').trim();
+  const options = (row.Options || '').split('|').map((o) => o.trim()).filter(Boolean);
+  const node = el('div', 'field');
+
+  const lbl = el('div', 'lbl');
+  lbl.append(el('div', 'mono', row.Setting));
+  if (row.Description) lbl.append(el('div', 'help', row.Description));
+  node.append(lbl);
+
+  const ctrl = el('div', 'ctrl');
+  let input;
+
+  if (type === 'bool') {
+    const wrap = el('label', 'switch');
+    input = el('input');
+    input.type = 'checkbox';
+    input.checked = /^(true|yes|1|on)$/i.test(original);
+    input.addEventListener('change',
+      () => track(row.Setting, input.checked ? 'TRUE' : 'FALSE', original || 'FALSE', node));
+    wrap.append(input, el('span', 'faint', 'on / off'));
+    ctrl.append(wrap);
+  } else if (type === 'select' && options.length) {
+    input = el('select');
+    options.forEach((o) => input.append(new Option(o, o)));
+    if (!options.includes(original) && original) input.append(new Option(original, original));
+    input.value = original;
+    input.addEventListener('change', () => track(row.Setting, input.value, original, node));
+    ctrl.append(input);
+  } else if (type === 'multiselect' && options.length) {
+    const chosen = new Set(original.split(',').map((v) => v.trim()).filter(Boolean));
+    const box = el('div', 'checks');
+    options.forEach((option) => {
+      const tag = el('label', chosen.has(option) ? 'on' : '');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = chosen.has(option);
+      cb.addEventListener('change', () => {
+        cb.checked ? chosen.add(option) : chosen.delete(option);
+        tag.classList.toggle('on', cb.checked);
+        track(row.Setting,
+              options.filter((o) => chosen.has(o)).join(', '), original, node);
+      });
+      tag.append(cb, document.createTextNode(option));
+      box.append(tag);
+    });
+    ctrl.append(box);
+  } else {
+    input = el('input');
+    input.type = (type === 'int' || type === 'float') ? 'number' : 'text';
+    if (type === 'float') input.step = '0.1';
+    input.value = original;
+    input.addEventListener('input', () => track(row.Setting, input.value, original, node));
+    ctrl.append(input);
+  }
+
+  if (row.Options) ctrl.append(el('div', 'help', `options: ${row.Options}`));
+  node.append(ctrl);
+  return node;
+}
 
 function renderSettings() {
   const host = $('settings-body');
   host.innerHTML = '';
-  const payload = data.cache.Settings;
-  if (!payload) {
+  for (const key of Object.keys(pending)) delete pending[key];
+
+  if (!SETTINGS_ROWS || !SETTINGS_ROWS.length) {
     host.append(el('p', 'muted',
-      'The last run published no Settings worksheet. Run “Refresh this dashboard”.'));
+      'No Settings worksheet was published. Run “Refresh this dashboard”.'));
     return;
   }
+
+  const editable = Boolean(SETTINGS_URL);
   const groups = new Map();
-  payload.rows.forEach((row) => {
-    const g = row.Group || 'Other';
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g).push(row);
+  SETTINGS_ROWS.forEach((row) => {
+    const group = row.Group || 'Other';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(row);
   });
   groups.forEach((rows, group) => {
     const box = el('div', 'setting-group');
     box.append(el('h3', '', group));
-    rows.forEach((row) => {
-      const field = el('div', 'field');
-      const lbl = el('div', 'lbl');
-      lbl.append(el('div', 'mono', row.Setting));
-      if (row.Description) lbl.append(el('div', 'help', row.Description));
-      const ctrl = el('div', 'ctrl');
-      const value = (row.Value || '').trim();
-      const shown = el('div', 'mono', value || '(default)');
-      if (!value) shown.classList.add('faint');
-      ctrl.append(shown);
-      if (row.Options) ctrl.append(el('div', 'help', `options: ${row.Options}`));
-      field.append(lbl, ctrl);
-      box.append(field);
-    });
+    rows.forEach((row) => box.append(
+      editable ? settingControl(row) : readOnlyRow(row)));
     host.append(box);
   });
+  $('settings-savebar').hidden = !editable;
+  markDirty();
+}
+
+function readOnlyRow(row) {
+  const node = el('div', 'field');
+  const lbl = el('div', 'lbl');
+  lbl.append(el('div', 'mono', row.Setting));
+  if (row.Description) lbl.append(el('div', 'help', row.Description));
+  const ctrl = el('div', 'ctrl');
+  const value = (row.Value || '').trim();
+  const shown = el('div', 'mono', value || '(default)');
+  if (!value) shown.classList.add('faint');
+  ctrl.append(shown);
+  if (row.Options) ctrl.append(el('div', 'help', `options: ${row.Options}`));
+  node.append(lbl, ctrl);
+  return node;
+}
+
+async function saveSettings() {
+  const changes = { ...pending };
+  const count = Object.keys(changes).length;
+  if (!count) return;
+
+  const button = $('settings-save');
+  button.disabled = true;
+  $('settings-status').textContent = 'saving…';
+  banner($('settings-error'), '', '');
+
+  try {
+    // Blind write — the response is unreadable cross-origin by design.
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ password: PASSWORD_FOR_SHEET, updates: changes }),
+    });
+
+    // Confirm against what the sheet now actually says.
+    $('settings-status').textContent = 'confirming…';
+    const live = await readLiveSettings();
+    SETTINGS_ROWS = live.rows;
+
+    const byPath = {};
+    live.rows.forEach((row) => { byPath[row.Setting] = String(row.Value || '').trim(); });
+    const missed = Object.entries(changes)
+      .filter(([path, want]) => byPath[path] !== String(want).trim())
+      .map(([path]) => path);
+
+    renderSettings();
+    if (missed.length) {
+      banner($('settings-error'), 'err',
+        `${count - missed.length} of ${count} saved. These did not stick: ${missed.join(', ')}.`);
+    } else {
+      banner($('settings-error'), 'ok',
+        `Saved ${count} setting${count === 1 ? '' : 's'} to the sheet. ` +
+        'The next run will use them.');
+    }
+  } catch (err) {
+    banner($('settings-error'), 'err',
+      `Could not confirm the save: ${err.message}. Check the Settings tab before retrying.`);
+  } finally {
+    markDirty();
+  }
 }
 
 function fmtDuration(a, b) {
@@ -522,6 +700,43 @@ async function loadSettings() {
   }
 }
 
+async function loadSettings() {
+  banner($('settings-error'), '', '');
+  const link = $('settings-edit');
+  link.href = `https://docs.google.com/spreadsheets/d/${MANIFEST.spreadsheet_id || ''}`;
+  link.hidden = !MANIFEST.spreadsheet_id;
+
+  try {
+    if (SETTINGS_URL) {
+      // Live from the sheet, so the panel shows the truth rather than whatever
+      // the last publish froze.
+      $('settings-body').innerHTML = '<p class="muted">reading the sheet…</p>';
+      SETTINGS_ROWS = (await readLiveSettings()).rows;
+    } else {
+      if (!data.cache.Settings) data.cache.Settings = await fetchEncrypted('Settings', KEY);
+      SETTINGS_ROWS = data.cache.Settings.rows;
+    }
+    renderSettings();
+    if (!SETTINGS_URL) {
+      banner($('settings-error'), 'warn',
+        'Read-only: no Settings service is configured, so this shows the last published ' +
+        'snapshot. Edit in Google Sheets, or set SETTINGS_WEB_APP_URL to enable saving here.');
+    }
+  } catch (err) {
+    // A live read failing must not leave an empty panel — fall back.
+    try {
+      if (!data.cache.Settings) data.cache.Settings = await fetchEncrypted('Settings', KEY);
+      SETTINGS_ROWS = data.cache.Settings.rows;
+      renderSettings();
+      $('settings-savebar').hidden = true;
+      banner($('settings-error'), 'warn',
+        `Showing the last published snapshot — the live sheet could not be read (${err.message}).`);
+    } catch (inner) {
+      banner($('settings-error'), 'err', `Could not load Settings: ${inner.message}`);
+    }
+  }
+}
+
 async function boot() {
   const sel = $('sheet-select');
   sel.innerHTML = '';
@@ -550,3 +765,6 @@ async function boot() {
 }
 
 resume().catch(() => { /* fall through to the login form */ });
+
+$('settings-save').addEventListener('click', saveSettings);
+$('settings-discard').addEventListener('click', () => { renderSettings(); });

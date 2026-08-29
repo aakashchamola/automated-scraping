@@ -194,8 +194,12 @@ jobs:
             workflow: "scheduled-pipeline.yml",
             branch: "${{ github.ref_name }}",
             builtAt: "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            settingsWebApp: "${{ secrets.SETTINGS_WEB_APP_URL }}",
           };
           JS
+          if [ -z "${{ secrets.SETTINGS_WEB_APP_URL }}" ]; then
+            echo "::notice::SETTINGS_WEB_APP_URL is not set — the Settings panel will be read-only."
+          fi
 
       - name: Remove the key before anything is uploaded
         run: rm -f secrets/google-service-account.json
