@@ -25,10 +25,15 @@ on:
         default: full
         options:
           - publish-only          # touch nothing; just refresh the dashboard
-          - full
-          - scrape-only
-          - validate-only
-          - career-pages-only
+          - full                  # enrich -> career pages -> job boards -> validate
+          - scrape-only           # job boards only
+          - career-pages-only     # company career pages only
+          - enrich-only           # fill employee count / career page / LinkedIn URL
+          - validate-only         # re-check every job link
+          - mismatch-only         # flag cells where scraped data disagrees
+          - classify-only         # company / university / government / ...
+          - pagination-only       # read-only "See More Jobs" depth report
+          - cleanup-rows          # clear stale company rows (dry-run unless confirmed)
 
 concurrency:                    # every step writes the same sheet tabs
   group: pipeline
@@ -67,6 +72,12 @@ jobs:
           python -c "import json;json.load(open('secrets/google-service-account.json'))" \
             || { echo "::error::the secret is not valid JSON"; exit 1; }
 
+      - name: Apply the Settings worksheet
+        # The published dashboard cannot write settings, so the Settings tab in
+        # the spreadsheet is where they are edited. Overlaying it here means a
+        # change made in the sheet takes effect on the next run with no commit.
+        run: python -u settings_sheet.py --config config.yaml --apply-to config.yaml
+
       - name: Configure this run
         run: |
           python - <<'PY'
@@ -96,6 +107,12 @@ jobs:
           case "${{ inputs.steps || 'full' }}" in
             scrape-only)        python -u main.py --config config.yaml ;;
             validate-only)      python -u job_validator.py --config config.yaml ;;
+            enrich-only)        python -u company_enricher.py --config config.yaml ;;
+            mismatch-only)      python -u company_validator.py --config config.yaml ;;
+            classify-only)      python -u company_classifier.py --config config.yaml ;;
+            pagination-only)    python -u pagination_analyzer.py --config config.yaml ;;
+            cleanup-rows)       python -u cleanup_validation.py \
+                                  --config cleanup_validation_config.json ;;
             career-pages-only)  python -u automation_pipeline.py --config config.yaml \
                                   --skip-enrichment --skip-keyword-scraping --skip-validation ;;
             *)                  python -u automation_pipeline.py --config config.yaml ;;
