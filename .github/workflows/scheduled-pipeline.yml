@@ -33,6 +33,11 @@ concurrency:                    # every step writes the same sheet tabs
   group: pipeline
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -112,3 +117,79 @@ jobs:
       - name: Remove the key from the runner
         if: always()
         run: rm -f secrets/google-service-account.json
+
+  # ── Publish the dashboard ──────────────────────────────────────────────────
+  # Exports the sheet tabs to JSON, encrypts them under DASHBOARD_PASSWORD, and
+  # deploys the static page. The service-account key exists only inside this
+  # job; the only thing that reaches Pages is ciphertext, so a public URL never
+  # exposes the sheet or the key.
+  publish:
+    needs: run
+    if: always() && needs.run.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Check the publishing secrets are set
+        env:
+          KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+          PW: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: |
+          missing=0
+          [ -n "$KEY" ] || { echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; missing=1; }
+          [ -n "$PW" ]  || { echo "::error::DASHBOARD_PASSWORD is not set"; missing=1; }
+          if [ ${#PW} -lt 8 ] && [ -n "$PW" ]; then
+            echo "::error::DASHBOARD_PASSWORD must be at least 8 characters"; missing=1
+          fi
+          [ $missing -eq 0 ] || exit 1
+          mkdir -p secrets && printf '%s' "$KEY" > secrets/google-service-account.json
+
+      - name: Export the sheet tabs
+        run: python -u export_snapshot.py --config config.yaml --out site/data
+
+      - name: Encrypt them
+        env:
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: python -u encrypt_snapshot.py --in site/data --out site/data
+
+      - name: Refuse to publish cleartext
+        # Cheap insurance: if the encrypt step ever changes shape, this stops a
+        # readable copy of the sheet reaching a public URL.
+        run: |
+          if ls site/data/*.json 2>/dev/null | grep -v '\.enc\.json$' | grep -q .; then
+            echo "::error::cleartext JSON found in site/data — refusing to publish"
+            ls -la site/data
+            exit 1
+          fi
+          echo "only ciphertext present:"; ls site/data
+
+      - name: Stamp the build
+        run: |
+          cat > site/config.js <<JS
+          window.DASHBOARD_CONFIG = {
+            repo: "${{ github.repository }}",
+            workflow: "scheduled-pipeline.yml",
+            branch: "${{ github.ref_name }}",
+            builtAt: "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          };
+          JS
+
+      - name: Remove the key before anything is uploaded
+        run: rm -f secrets/google-service-account.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

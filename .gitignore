@@ -23,3 +23,5 @@ logs/
 Thumbs.db
 
 secrets
+# Generated snapshots — never commit sheet data, encrypted or not
+site/data/
