@@ -1,0 +1,89 @@
+# Answers one question before anyone builds a deployment on top of a wrong
+# assumption: do the job boards this pipeline depends on actually respond to a
+# cloud runner, or do they block the datacenter IP range?
+#
+# Run it from the Actions tab. It scrapes nothing and writes nothing.
+name: Probe — do job boards answer a datacenter IP?
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install the scraper's own HTTP dependencies
+        run: pip install -q requests beautifulsoup4
+
+      - name: Probe each platform
+        run: |
+          python - <<'PY'
+          import json, requests
+          from bs4 import BeautifulSoup
+
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+          H = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
+
+          print("runner egress IP:",
+                requests.get("https://api.ipify.org", timeout=15).text)
+          print()
+
+          # The exact endpoint scrapers/linkedin.py uses.
+          TARGETS = {
+            "linkedin (guest jobs API)":
+              "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/"
+              "search?keywords=Microbiologist&location=United%20States&start=0",
+            "indeed":       "https://www.indeed.com/jobs?q=Microbiologist&l=United+States",
+            "internshala":  "https://internshala.com/internships/keywords-microbiologist",
+            "greenhouse (ATS API)":
+              "https://boards-api.greenhouse.io/v1/boards/natera/jobs",
+            "workday (ATS API)":
+              "https://amgen.wd1.myworkdayjobs.com/wday/cxs/amgen/Careers/jobs",
+          }
+
+          rows = []
+          for name, url in TARGETS.items():
+              try:
+                  if "wday/cxs" in url:
+                      r = requests.post(url, json={"appliedFacets": {}, "limit": 20,
+                                                   "offset": 0, "searchText": ""},
+                                        headers={**H, "Content-Type": "application/json"},
+                                        timeout=25)
+                  else:
+                      r = requests.get(url, headers=H, timeout=25)
+                  code = r.status_code
+                  # Did we get real job data, or a challenge page?
+                  if "greenhouse" in name:
+                      n = len(r.json().get("jobs", []))
+                  elif "workday" in name:
+                      n = len(r.json().get("jobPostings", []))
+                  elif "linkedin" in name:
+                      n = len(BeautifulSoup(r.text, "html.parser").select("li"))
+                  else:
+                      n = len(BeautifulSoup(r.text, "html.parser")
+                              .select('[class*="job"], [data-jk]'))
+                  blocked = any(s in r.text.lower() for s in
+                                ("cf-browser-verification", "just a moment",
+                                 "access denied", "unusual traffic", "captcha"))
+                  verdict = ("BLOCKED (challenge page)" if blocked else
+                             "OK" if code == 200 and n else
+                             f"EMPTY (200 but 0 items)" if code == 200 else
+                             f"HTTP {code}")
+              except Exception as exc:
+                  code, n, verdict = "-", 0, f"ERROR {type(exc).__name__}"
+              rows.append((name, code, n, verdict))
+              print(f"{name:<28} status={code!s:<5} items={n:<4} {verdict}")
+
+          print()
+          ok = [r for r in rows if r[3] == "OK"]
+          print(f"=> {len(ok)}/{len(rows)} sources usable from this datacenter IP")
+          for name, _, n, _ in ok:
+              print(f"   usable: {name} ({n} items)")
+          PY
