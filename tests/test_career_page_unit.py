@@ -221,5 +221,72 @@ class ScrapeCompaniesInputTest(unittest.TestCase):
         )
 
 
+
+class DetectWorkdayTest(unittest.TestCase):
+    """Workday hosts most large employers in the company list; its career pages
+    are JS shells, so detection has to come off the URL."""
+
+    def test_detects_tenant_datacenter_and_site(self):
+        self.assertEqual(
+            career_page.detect_ats("", "https://amgen.wd1.myworkdayjobs.com/en-US/Careers"),
+            ("workday", "amgen/wd1/Careers"))
+
+    def test_locale_segment_is_not_mistaken_for_the_site(self):
+        ats, token = career_page.detect_ats("", "https://att.wd1.myworkdayjobs.com/en-US/ATTGeneral")
+        self.assertEqual((ats, token), ("workday", "att/wd1/ATTGeneral"))
+        self.assertNotIn("en-US", token)
+
+    def test_site_without_locale(self):
+        self.assertEqual(
+            career_page.detect_ats("", "https://gilead.wd1.myworkdayjobs.com/gileadcareers"),
+            ("workday", "gilead/wd1/gileadcareers"))
+
+    def test_trailing_page_words_are_skipped_not_taken_as_the_site(self):
+        # ".../JJ/login" and ".../PfizerCareers/page" — the site is the first
+        # segment, and "login"/"userHome" must never be treated as one.
+        self.assertEqual(
+            career_page.detect_ats("", "https://jj.wd5.myworkdayjobs.com/JJ/login"),
+            ("workday", "jj/wd5/JJ"))
+        self.assertEqual(
+            career_page.detect_ats("", "https://accenture.wd103.myworkdayjobs.com/AccentureCareers/userHome"),
+            ("workday", "accenture/wd103/AccentureCareers"))
+
+    def test_three_digit_datacenter(self):
+        ats, token = career_page.detect_ats("", "https://alvotech.wd103.myworkdayjobs.com/Alvotech_Careers")
+        self.assertEqual(token, "alvotech/wd103/Alvotech_Careers")
+
+    def test_detected_from_page_html_not_only_the_url(self):
+        html = '<script>var u="https://pfizer.wd1.myworkdayjobs.com/PfizerCareers";</script>'
+        self.assertEqual(career_page.detect_ats(html, "https://pfizer.com/careers"),
+                         ("workday", "pfizer/wd1/PfizerCareers"))
+
+
+class ParseWorkdayTest(unittest.TestCase):
+    def test_external_path_is_joined_to_the_site_base(self):
+        payload = {"total": 2, "jobPostings": [
+            {"title": "Senior Scientist", "externalPath": "/job/San-Diego/Senior-Scientist_R-123",
+             "locationsText": "United States - California - San Diego"},
+            {"title": "Data Analyst", "externalPath": "/job/Raleigh/Data-Analyst_R-456",
+             "locationsText": "2 Locations"},
+        ]}
+        base = "https://pfizer.wd1.myworkdayjobs.com/en-US/PfizerCareers"
+        jobs = career_page.parse_workday(payload, "Pfizer", "Scientist", base=base)
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(jobs[0]["Role"], "Senior Scientist")
+        self.assertEqual(jobs[0]["Location"], "United States - California - San Diego")
+        self.assertEqual(jobs[0]["Job Link"],
+                         base + "/job/San-Diego/Senior-Scientist_R-123")
+        self.assertEqual(jobs[0]["Company"], "Pfizer")
+
+    def test_postings_without_a_path_are_dropped(self):
+        payload = {"jobPostings": [{"title": "Ghost", "externalPath": ""},
+                                   {"title": "", "externalPath": "/job/x"}]}
+        self.assertEqual(career_page.parse_workday(payload, "X", "k", base="b"), [])
+
+    def test_empty_payload_is_safe(self):
+        self.assertEqual(career_page.parse_workday({}, "X", "k"), [])
+        self.assertEqual(career_page.parse_workday(None, "X", "k"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

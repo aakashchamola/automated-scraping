@@ -85,9 +85,26 @@ _ATS_DETECTORS = (
 )
 
 
+# Workday needs three parts, not one slug: the tenant, the data centre it is
+# hosted in (wd1, wd5, wd103 …) and the career site name. The optional
+# "en-US"-style locale segment sits between the host and the site and must not
+# be mistaken for it.
+_WORKDAY = re.compile(
+    r"([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]+)", re.I)
+
+_WORKDAY_NOT_A_SITE = {"login", "userhome", "job", "wday", "en-us"}
+
+
 def detect_ats(html: str, final_url: str = "") -> tuple:
     """Return (ats_name, token) detected from page HTML / URL, or (None, None)."""
     haystack = f"{final_url}\n{html or ''}"
+
+    for match in _WORKDAY.finditer(haystack):
+        tenant, datacenter, site = match.group(1), match.group(2).lower(), match.group(3)
+        if site.lower() in _WORKDAY_NOT_A_SITE:
+            continue
+        return "workday", f"{tenant}/{datacenter}/{site}"
+
     for ats_name, pattern in _ATS_DETECTORS:
         m = pattern.search(haystack)
         if m:
@@ -133,6 +150,67 @@ def parse_ashby(payload: dict, company: str, keyword: str) -> list:
     return jobs
 
 
+def parse_workday(payload: dict, company: str, keyword: str, base: str = "") -> list:
+    """Workday returns paths, not URLs — externalPath must be joined to the site."""
+    jobs = []
+    for j in (payload or {}).get("jobPostings", []):
+        title = (j.get("title") or "").strip()
+        path = (j.get("externalPath") or "").strip()
+        loc = (j.get("locationsText") or "").strip()
+        if title and path:
+            jobs.append(_job(company, title, loc, f"{base}{path}", keyword))
+    return jobs
+
+
+def fetch_workday_jobs(
+    token: str, company: str, keyword: str, timeout: int = 15, max_jobs: int = 200
+) -> list:
+    """Page through a Workday career site's public JSON API.
+
+    Workday is the ATS behind most large employers in the company list (Pfizer,
+    BMS, J&J, Amgen, Gilead, Abbott …). Its career pages are JavaScript shells
+    with no jobs in the HTML, so without this they scrape to zero. The endpoint
+    the page's own front-end calls is public and takes a POST.
+    """
+    try:
+        tenant, datacenter, site = token.split("/")
+    except ValueError:
+        return []
+
+    host = f"https://{tenant}.{datacenter}.myworkdayjobs.com"
+    api = f"{host}/wday/cxs/{tenant}/{site}/jobs"
+    base = f"{host}/en-US/{site}"
+    headers = dict(_BROWSER_HEADERS)
+    headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+
+    jobs, offset, page_size = [], 0, 20
+    while len(jobs) < max_jobs:
+        try:
+            resp = requests.post(
+                api, json={"appliedFacets": {}, "limit": page_size,
+                           "offset": offset, "searchText": ""},
+                headers=headers, timeout=timeout)
+        except requests.RequestException as exc:
+            logger.warning(f"[career] workday fetch failed for {company!r}: {exc}")
+            break
+        if resp.status_code != 200:
+            logger.debug(f"[career] workday HTTP {resp.status_code} for {token!r}")
+            break
+        try:
+            payload = resp.json()
+        except ValueError:
+            break
+
+        page = parse_workday(payload, company, keyword, base=base)
+        if not page:
+            break
+        jobs.extend(page)
+        offset += page_size
+        if offset >= int(payload.get("total") or 0):
+            break
+    return jobs[:max_jobs]
+
+
 _ATS_API = {
     "greenhouse": (
         "https://boards-api.greenhouse.io/v1/boards/{token}/jobs",
@@ -153,6 +231,9 @@ def fetch_ats_jobs(
     ats: str, token: str, company: str, keyword: str, timeout: int = 15
 ) -> list:
     """Fetch + parse jobs from a detected ATS JSON API."""
+    if ats == "workday":
+        return fetch_workday_jobs(token, company, keyword, timeout=timeout)
+
     spec = _ATS_API.get(ats)
     if not spec:
         return []
