@@ -22,9 +22,13 @@ logs/
 *.session
 *.session-journal
 visa_slot_monitor/siren.wav
+# Holds Telegram api_id/api_hash — never commit; config.sample.json is the template
+visa_slot_monitor/config.json
 
 # OS
 .DS_Store
 Thumbs.db
 
 secrets
+
+.env

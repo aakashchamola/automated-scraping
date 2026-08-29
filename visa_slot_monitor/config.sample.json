@@ -6,29 +6,104 @@
         "channels": [
             "AllIndiaVisaAutoSlotNotifier",
             "f1_visa_slots_updatesonly",
-            "USAslotsupdates",
-            "f1visaslots",
-            "F1_Visa_Slots_Only"
+            "f1visaslots"
         ]
     },
     "filter": {
         "slot_keywords": [
-            "slot", "slots", "open", "opened", "opening", "available",
-            "availability", "released", "release", "calendar", "dates out"
+            "slot",
+            "slots",
+            "open",
+            "opened",
+            "opening",
+            "available",
+            "availability",
+            "released",
+            "release",
+            "calendar",
+            "dates out"
         ],
-        "visa_keywords": ["f1", "f-1", "student", "b1", "b2", "b1/b2"],
-        "consulates": ["delhi", "new delhi", "mumbai", "chennai", "hyderabad", "kolkata"],
+        "visa_keywords": [
+            "f1",
+            "f-1",
+            "student",
+            "b1",
+            "b2",
+            "b1/b2"
+        ],
+        "consulates": [
+            "delhi",
+            "new delhi",
+            "mumbai",
+            "chennai",
+            "hyderabad",
+            "kolkata"
+        ],
         "block_keywords": [
-            "dm me", "dm for", "dm to", "paid service", "payment", "charges",
-            "promo", "advertisement", "sponsored", "http://bit.ly",
-            "ping me", "inbox me", "reach out", "contact on", "contact me",
-            "we offer", "no advance", "confirmation within", "fast confirmation",
-            "low cost", "low charges", "genuine", "guaranteed", "whatsapp",
-            "recommend", "helped me", "booked my", "assistance",
-            "usdt", "margin mode", "stop loss", "take-profit",
-            "scam", "fraud", "cheated", "please remove", "took my money"
+            "dm me",
+            "dm for",
+            "dm to",
+            "paid service",
+            "payment",
+            "charges",
+            "promo",
+            "advertisement",
+            "sponsored",
+            "http://bit.ly",
+            "ping me",
+            "inbox me",
+            "reach out",
+            "contact on",
+            "contact me",
+            "we offer",
+            "no advance",
+            "confirmation within",
+            "fast confirmation",
+            "low cost",
+            "low charges",
+            "genuine",
+            "guaranteed",
+            "whatsapp",
+            "recommend",
+            "helped me",
+            "booked my",
+            "assistance",
+            "usdt",
+            "margin mode",
+            "stop loss",
+            "take-profit",
+            "scam",
+            "fraud",
+            "cheated",
+            "please remove",
+            "took my money",
+            "easyslotbooking",
+            "subject to a 30-minute delay",
+            "download-bot",
+            "chrome extension",
+            "private channels",
+            "booking assistance",
+            "drop us a message",
+            "msg us",
+            "msg me",
+            "message us",
+            "text us",
+            "for booking"
         ],
-        "alert_on_uncertain": false
+        "alert_on_uncertain": false,
+        "watch_consulates": [
+            "new delhi",
+            "mumbai",
+            "chennai",
+            "hyderabad",
+            "kolkata"
+        ],
+        "watch_visa_types": [
+            "F-1",
+            "F1"
+        ],
+        "max_alert_age_minutes": 15,
+        "payload_repeat_window_seconds": 3600
     },
     "alerts": {
         "ntfy": {
@@ -65,9 +140,7 @@
         "reputation": {
             "t.me/AllIndiaVisaAutoSlotNotifier": 3,
             "t.me/f1_visa_slots_updatesonly": 2,
-            "t.me/USAslotsupdates": 2,
             "t.me/f1visaslots": 1,
-            "t.me/F1_Visa_Slots_Only": 1,
             "reddit.com": 2
         },
         "default_reputation": 1,
@@ -77,7 +150,10 @@
         "interval_seconds": 45
     },
     "reddit": {
-        "subreddits": ["f1visa", "usvisascheduling"],
+        "subreddits": [
+            "f1visa",
+            "usvisascheduling"
+        ],
         "interval_seconds": 90
     },
     "monitoring": {

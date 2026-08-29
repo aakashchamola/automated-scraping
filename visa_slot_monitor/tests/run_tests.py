@@ -8,6 +8,7 @@ spam corpus, date/consulate extraction, dispatcher scoring, cross-process
 cooldown persistence, template suppression, and config validation.
 """
 
+import datetime
 import json
 import os
 import sys
@@ -164,6 +165,176 @@ class ConfigTests(unittest.TestCase):
             json.dump(cfg, fh)
         with self.assertRaises(SystemExit):
             config_util.load_config(cfg_path, require_telegram_creds=True)
+
+
+
+# ── Real notifier-bot template (captured from AllIndiaVisaAutoSlotNotifier) ──
+# Verbatim shape of the ONLY messages in the watched channels that carry real
+# slot data. Everything else in those channels is advertising or chatter.
+
+BOT_UPDATE_DELHI = """UPDATE from BOT 
+------------------------- 
+BotID : (#7039)
+Page : Interview
+Attempt : Fresher
+Profile : Regular
+Visa Type : F-1
+
+Consulate : NEW DELHI
+September 2026: \U0001f7e2
+2,3,4,8,10,11,14,15,16,17,18
+Number of Slots :
+21 slots on 2th
+
+Consulate : NEW DELHI
+October 2026: \U0001f7e2
+8,9
+
+=========================== 
+
+No data is available for the Biometrics.
+Time-stamp( {stamp} IST)"""
+
+BOT_UPDATE_KARACHI = """UPDATE from BOT 
+------------------------- 
+BotID : (#1527)
+Page : Interview
+Attempt : Fresher
+Profile : Regular
+Visa Type : F-1
+
+Consulate : KARACHI
+January 2027:
+20,21,26,28,29
+Number of Slots :
+1 slots on 20th
+
+ 
+Time-stamp( {stamp} IST)"""
+
+CHANNEL_AD = ("\U0001f6a8 This is a public channel. Please note that all alerts in this "
+              "channel are subject to a 30-minute delay.\n\nInstall Google-approved "
+              "Chrome Extension For Slot Booking - https://easyslotbooking.com/download-BOT")
+
+
+def _stamped(template: str, minutes_ago: float) -> str:
+    """Render a bot template whose Time-stamp is *minutes_ago* old, in IST."""
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    when = datetime.datetime.now(ist) - datetime.timedelta(minutes=minutes_ago)
+    return template.format(stamp=when.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+class BotUpdateParserTests(unittest.TestCase):
+    """The structured path: real dates, real seats, real freshness."""
+
+    def setUp(self):
+        self.flt = load_cfg()["filter"]
+
+    def test_real_slot_dates_are_extracted_not_the_timestamp(self):
+        # The defect this fixes: the alert used to report the message's own
+        # Time-stamp line ("08-23") as the slot date.
+        det = slot_parser.classify(_stamped(BOT_UPDATE_DELHI, 2), self.flt)
+        self.assertIsNotNone(det)
+        self.assertEqual(det["format"], "bot_update")
+        self.assertEqual(det["consulates"], ["new delhi"])
+        self.assertIn("Sep 2", det["dates"])
+        self.assertIn("Sep 18", det["dates"])
+        self.assertIn("Oct 9", det["dates"])
+        self.assertEqual(det["seats"], 21)
+        self.assertEqual(det["visa_types"], ["F-1"])
+        self.assertEqual(det["attempt"], "Fresher")
+        # no fragment of the timestamp leaked in as a date
+        self.assertFalse([d for d in det["dates"] if "-" in d])
+
+    def test_two_month_blocks_both_captured(self):
+        parsed = slot_parser.parse_bot_update(_stamped(BOT_UPDATE_DELHI, 1))
+        self.assertEqual(len(parsed["blocks"]), 2)
+        self.assertEqual(parsed["blocks"][0]["month"], "September 2026")
+        self.assertEqual(parsed["blocks"][0]["days"], [2, 3, 4, 8, 10, 11, 14, 15, 16, 17, 18])
+        self.assertEqual(parsed["blocks"][1]["month"], "October 2026")
+        self.assertEqual(parsed["blocks"][1]["days"], [8, 9])
+
+    def test_fresh_update_is_not_stale(self):
+        det = slot_parser.classify(_stamped(BOT_UPDATE_DELHI, 2), self.flt)
+        self.assertFalse(det["stale"])
+        self.assertLess(det["age_minutes"], 5)
+
+    def test_old_update_is_marked_stale(self):
+        det = slot_parser.classify(_stamped(BOT_UPDATE_DELHI, 45), self.flt)
+        self.assertTrue(det["stale"])
+        self.assertGreater(det["age_minutes"], 40)
+
+    def test_unwatched_consulate_is_dropped(self):
+        # Karachi/Islamabad are genuine openings — just not bookable by this
+        # applicant. Alerting on them is pure alarm fatigue.
+        self.assertIsNone(slot_parser.classify(_stamped(BOT_UPDATE_KARACHI, 1), self.flt))
+
+    def test_unwatched_visa_type_is_dropped(self):
+        j2 = _stamped(BOT_UPDATE_DELHI, 1).replace("Visa Type : F-1", "Visa Type : J-2")
+        self.assertIsNone(slot_parser.classify(j2, self.flt))
+
+    def test_channel_advertisement_is_blocked(self):
+        self.assertIsNone(slot_parser.classify(CHANNEL_AD, self.flt))
+
+    def test_channel_handle_is_not_content(self):
+        # "@f1_visa_slots_updatesonly" contains both "f1" and "slot"; an
+        # admin housekeeping post used to siren because of the handle alone.
+        admin = ("Dear members of @f1_visa_slots_updatesonly, please do not share "
+                 "your login credentials with anyone.")
+        self.assertIsNone(slot_parser.classify(admin, self.flt))
+
+
+class FreshnessAndRepeatTests(unittest.TestCase):
+    """Dispatcher behaviour on the structured path."""
+
+    def setUp(self):
+        self.cfg = load_cfg()
+        self.tmp = tempfile.mkdtemp()
+        dispatcher._STATE_PATH = os.path.join(self.tmp, "state.json")
+        dispatcher._HISTORY_CSV = os.path.join(self.tmp, "history.csv")
+        self.fired = []
+        self._real_fire = dispatcher.alerts.fire
+        dispatcher.alerts.fire = lambda cfg, title, body, urgent=True: \
+            self.fired.append({"title": title, "body": body, "urgent": urgent})
+
+    def tearDown(self):
+        dispatcher.alerts.fire = self._real_fire
+
+    def test_fresh_update_sirens_with_real_dates_in_body(self):
+        dispatcher.process_message(
+            self.cfg, "t.me/AllIndiaVisaAutoSlotNotifier", _stamped(BOT_UPDATE_DELHI, 2))
+        self.assertEqual(len(self.fired), 1)
+        alert = self.fired[0]
+        self.assertTrue(alert["urgent"])
+        self.assertIn("NEW DELHI", alert["title"])
+        self.assertIn("September 2026: 2, 3, 4", alert["body"])
+        self.assertIn("21 seats", alert["body"])
+
+    def test_stale_update_pushes_quietly_and_says_so(self):
+        dispatcher.process_message(
+            self.cfg, "t.me/AllIndiaVisaAutoSlotNotifier", _stamped(BOT_UPDATE_DELHI, 45))
+        self.assertEqual(len(self.fired), 1)
+        alert = self.fired[0]
+        self.assertFalse(alert["urgent"], "a 45-minute-old slot must not ring the siren")
+        self.assertIn("STALE", alert["title"])
+
+    def test_same_availability_reposted_fires_once(self):
+        # Bot #1527 re-posted identical availability 8 times in 20 minutes;
+        # only the Time-stamp differed, so raw-text hashing saw 8 new messages.
+        for minutes in (6, 5, 4, 3, 2, 1):
+            dispatcher.process_message(
+                self.cfg, "t.me/AllIndiaVisaAutoSlotNotifier",
+                _stamped(BOT_UPDATE_DELHI, minutes))
+        self.assertEqual(len(self.fired), 1,
+                         f"expected 1 alert for 6 identical re-posts, got {len(self.fired)}")
+
+    def test_changed_availability_fires_again(self):
+        dispatcher.process_message(
+            self.cfg, "t.me/AllIndiaVisaAutoSlotNotifier", _stamped(BOT_UPDATE_DELHI, 3))
+        moved = _stamped(BOT_UPDATE_DELHI, 1).replace(
+            "2,3,4,8,10,11,14,15,16,17,18", "5,6,7")
+        dispatcher.process_message(self.cfg, "t.me/AllIndiaVisaAutoSlotNotifier", moved)
+        self.assertEqual(len(self.fired), 2)
 
 
 if __name__ == "__main__":
