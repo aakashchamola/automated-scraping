@@ -260,3 +260,9 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 .gate .err { color: var(--err); font-size: 13px; min-height: 1.2em; }
 .gate .lock { font-size: 26px; line-height: 1; }
 .stale { background: var(--warn-soft); color: var(--warn); }
+
+/* Setting paths are long dotted identifiers; without this they run under the
+   value column instead of wrapping. */
+#settings-body .lbl .mono { overflow-wrap: anywhere; line-height: 1.45; }
+#settings-body .field { grid-template-columns: minmax(240px, 360px) 1fr; }
+#settings-body .ctrl .mono { overflow-wrap: anywhere; }
