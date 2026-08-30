@@ -78,9 +78,10 @@ async function idbGet(key) {
   return value;
 }
 
-async function rememberKey(key) {
+async function rememberKey(key, token) {
   try {
     await idbPut('data-key', key);
+    await idbPut('session-token', token || null);
     localStorage.setItem(EXPIRY_KEY, String(Date.now() + REMEMBER_DAYS * 864e5));
   } catch (e) {
     // Private browsing and blocked site data both land here. Staying signed in
@@ -96,6 +97,7 @@ async function recallKey() {
       await forgetKey();
       return null;
     }
+    SESSION_TOKEN = (await idbGet('session-token')) || null;
     return (await idbGet('data-key')) || null;
   } catch {
     return null;
@@ -106,6 +108,8 @@ async function forgetKey() {
   try {
     localStorage.removeItem(EXPIRY_KEY);
     await idbPut('data-key', null);
+    await idbPut('session-token', null);
+    SESSION_TOKEN = null;
   } catch { /* nothing to clean up */ }
 }
 
@@ -136,24 +140,48 @@ async function fetchEncrypted(name, key) {
 
 let KEY = null;          // the derived CryptoKey; the password is never kept
 let MANIFEST = null;
-/* The Apps Script Web App checks the same shared password. It has to be sent
-   as text, so unlike the data key it cannot be kept as a non-extractable key —
-   it lives in memory for this page load only, and a remembered session
-   (key-only) therefore leaves Settings read-only until the next sign-in. */
-let PASSWORD_FOR_SHEET = null;
+/* Issued by the Settings service after a correct password. The page remembers
+   this instead of the password, so staying signed in never means keeping what
+   someone typed — and changing the password revokes it server-side. */
+let SESSION_TOKEN = null;
 
+/* Sign in.
+
+   With a Settings service configured, the password is checked there and the
+   service hands back two things: the key the published files were encrypted
+   with, and a session token. The password is never the encryption key, which
+   is exactly what makes it changeable from this page — changing an encryption
+   key would strand every already-published file.
+
+   Without a service, the password IS the key (the original arrangement), and
+   the page still works standalone — it just cannot save settings or change
+   the password. */
 async function unlock(password, remember) {
-  // Derive from index's salt — every file in a publish shares it, so one
-  // derivation covers the whole dashboard.
   const payload = await fetchPayload('index');
-  const key = await deriveKey(password, payload.kdf);
-  MANIFEST = await decryptWith(key, payload);           // throws on a bad password
+  let key;
+
+  if (SETTINGS_URL) {
+    const auth = await jsonp(
+      `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+    if (!auth.ok) throw new AuthError(auth.error || 'sign-in was refused');
+    key = await deriveKey(auth.dataKey, payload.kdf);
+    SESSION_TOKEN = auth.token;
+  } else {
+    key = await deriveKey(password, payload.kdf);
+  }
+
+  MANIFEST = await decryptWith(key, payload);      // throws if the key is wrong
   KEY = key;
-  PASSWORD_FOR_SHEET = password;
-  if (remember) await rememberKey(key);
+  if (remember) await rememberKey(key, SESSION_TOKEN);
   $('gate').hidden = true;
   $('app').hidden = false;
   await boot();
+}
+
+/* A refusal from the service is a wrong password, not a broken page — the
+   login form should say so plainly rather than showing a decryption error. */
+class AuthError extends Error {
+  constructor(message) { super(message); this.name = 'AuthError'; }
 }
 
 /* Resume a remembered session. A key that no longer decrypts means the
@@ -185,8 +213,8 @@ $('gate-form').addEventListener('submit', async (e) => {
   try {
     await unlock($('gate-pw').value, $('gate-remember').checked);
   } catch (ex) {
-    err.textContent = ex.name === 'OperationError'
-      ? 'Wrong password.'
+    err.textContent = (ex.name === 'OperationError' || ex.name === 'AuthError')
+      ? (ex.name === 'AuthError' ? ex.message : 'Wrong password.')
       : `Could not unlock: ${ex.message}`;
     $('gate-pw').select();
   } finally {
@@ -456,8 +484,12 @@ function jsonp(url, timeoutMs = 15000) {
 
 async function readLiveSettings() {
   const payload = await jsonp(
-    `${SETTINGS_URL}?password=${encodeURIComponent(PASSWORD_FOR_SHEET)}`);
-  if (!payload.ok) throw new Error(payload.error || 'the Settings service refused the request');
+    `${SETTINGS_URL}?token=${encodeURIComponent(SESSION_TOKEN || '')}`);
+  if (!payload.ok) {
+    // A revoked token means the password was changed elsewhere.
+    if (payload.signedOut) throw new AuthError('this session is no longer valid');
+    throw new Error(payload.error || 'the Settings service refused the request');
+  }
   return payload.settings;
 }
 
@@ -563,6 +595,7 @@ function renderSettings() {
     host.append(box);
   });
   $('settings-savebar').hidden = !editable;
+  $('password-card').hidden = !editable;
   markDirty();
 }
 
@@ -581,6 +614,58 @@ function readOnlyRow(row) {
   return node;
 }
 
+/* Changing the login password. It is only a Script Property on the service —
+   nothing is encrypted with it — so this takes effect immediately and does not
+   require anything to be republished. Every existing session is revoked, this
+   one included, so the change is visibly real rather than silent. */
+async function changePassword() {
+  const current = $('pw-current').value;
+  const next = $('pw-new').value;
+  const again = $('pw-repeat').value;
+  const status = $('pw-status');
+
+  if (next !== again) { status.textContent = 'The new passwords do not match.'; return; }
+  if (next.length < 8) { status.textContent = 'Use at least 8 characters.'; return; }
+
+  $('pw-change').disabled = true;
+  status.textContent = 'changing…';
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        token: SESSION_TOKEN, action: 'changePassword',
+        currentPassword: current, newPassword: next,
+      }),
+    });
+
+    // The write's own answer is unreadable, so prove it by signing in with the
+    // new password. Success also re-establishes a session, since the change
+    // revoked the old one.
+    const check = await jsonp(
+      `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(next)}`);
+    if (check.ok) {
+      SESSION_TOKEN = check.token;
+      if (remainingDays()) await rememberKey(KEY, SESSION_TOKEN);
+      ['pw-current', 'pw-new', 'pw-repeat'].forEach((id) => { $(id).value = ''; });
+      status.textContent = '';
+      banner($('settings-error'), 'ok',
+        'Password changed. Everyone signed in elsewhere will have to sign in again ' +
+        'with the new one.');
+    } else {
+      status.textContent = '';
+      banner($('settings-error'), 'err',
+        `The password was not changed: ${check.error || 'the service refused it'}.`);
+    }
+  } catch (err) {
+    status.textContent = '';
+    banner($('settings-error'), 'err', `Could not change the password: ${err.message}`);
+  } finally {
+    $('pw-change').disabled = false;
+  }
+}
+
 async function saveSettings() {
   const changes = { ...pending };
   const count = Object.keys(changes).length;
@@ -597,7 +682,7 @@ async function saveSettings() {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ password: PASSWORD_FOR_SHEET, updates: changes }),
+      body: JSON.stringify({ token: SESSION_TOKEN, updates: changes }),
     });
 
     // Confirm against what the sheet now actually says.
@@ -768,3 +853,5 @@ resume().catch(() => { /* fall through to the login form */ });
 
 $('settings-save').addEventListener('click', saveSettings);
 $('settings-discard').addEventListener('click', () => { renderSettings(); });
+
+$('pw-change').addEventListener('click', changePassword);

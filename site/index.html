@@ -119,6 +119,35 @@
           <span id="settings-status" class="faint"></span>
         </div>
       </div>
+
+      <div class="card" id="password-card" hidden>
+        <div class="card-head">
+          <h2>Access password</h2>
+          <span class="faint">Changes immediately. Nothing is re-published, because the
+            published data is encrypted with a separate key.</span>
+        </div>
+        <div class="card-body">
+          <div class="field">
+            <div class="lbl">Current password
+              <div class="help">Required even while signed in, so a borrowed session
+                cannot lock you out.</div>
+            </div>
+            <div class="ctrl"><input type="password" id="pw-current" autocomplete="current-password"></div>
+          </div>
+          <div class="field">
+            <div class="lbl">New password<div class="help">At least 8 characters.</div></div>
+            <div class="ctrl"><input type="password" id="pw-new" autocomplete="new-password"></div>
+          </div>
+          <div class="field">
+            <div class="lbl">Repeat new password</div>
+            <div class="ctrl"><input type="password" id="pw-repeat" autocomplete="new-password"></div>
+          </div>
+        </div>
+        <div class="savebar">
+          <button id="pw-change" class="btn primary">Change password</button>
+          <span id="pw-status" class="faint"></span>
+        </div>
+      </div>
     </section>
   </main>
 </div>

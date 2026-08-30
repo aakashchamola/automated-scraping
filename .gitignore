@@ -28,3 +28,6 @@ site/data/
 
 # Local dashboard login (hash + session key) — never commit
 .dashboard-auth.json
+
+# Stable AES key for the published data — never commit
+.dashboard-data-key.txt

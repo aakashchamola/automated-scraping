@@ -1,36 +1,53 @@
 /**
- * Settings.gs — lets the published dashboard save settings back to this sheet.
+ * Settings.gs — the published dashboard's server side.
  *
  * The dashboard is a static page on GitHub Pages with no credentials, so it
  * cannot talk to the Sheets API. This Web App is the missing half: it runs as
- * the sheet's owner, checks a shared password, and writes the Settings tab.
+ * the sheet's owner, checks the login password, and reads and writes the
+ * Settings tab.
  *
- * TWO RULES, both learned the hard way on an earlier project:
+ * TWO SECRETS, kept deliberately separate — this is the whole reason the
+ * password can be changed from the dashboard:
+ *
+ *   DASHBOARD_PASSWORD   what people type to sign in. Lives here, in Script
+ *                        Properties, and can be changed from the dashboard,
+ *                        because nothing is encrypted with it.
+ *   DASHBOARD_DATA_KEY   the key the published data files were encrypted with
+ *                        at publish time. Handed to the page only after the
+ *                        password checks out. It must never change — every
+ *                        already-published file was encrypted with it.
+ *
+ * Making the password itself the encryption key (the earlier design) is what
+ * made it unchangeable: altering it meant re-encrypting and republishing every
+ * file, which a browser cannot do.
+ *
+ * TWO CORS RULES, both learned the hard way on an earlier project:
  *
  *   1. A Web App's /exec response carries NO Access-Control-Allow-Origin, so a
  *      cors-mode fetch that READS the response fails with ERR_FAILED. Writes
- *      must therefore be sent no-cors (fire-and-forget, response unreadable).
- *   2. Because the write's result cannot be read, the caller confirms by
- *      reading back — and that read must be JSONP (a <script> tag), which is
- *      not subject to CORS at all.
+ *      must be sent no-cors (fire-and-forget, response unreadable).
+ *   2. Because a write's result cannot be read, the caller confirms by reading
+ *      back — and that read must be JSONP (a <script> tag), which CORS does
+ *      not apply to.
  *
- * So: doPost writes and says nothing useful; doGet serves JSONP for reading
- * and confirming.
+ * So doGet serves JSONP for every read, and doPost writes and says nothing the
+ * caller can hear.
  *
- * Set up ONCE. It never needs editing again: it reads and writes whatever rows
- * the Settings tab happens to contain, keyed by the Setting column, so adding
- * or removing settings later is a change to that tab and to the pipeline's
- * schema — never to this file.
+ * ── SET UP ONCE ────────────────────────────────────────────────────────────
+ * It never needs editing again. It reads and writes whatever rows the Settings
+ * tab happens to contain, keyed by the Setting column, so adding settings
+ * later is a change to that tab — never to this file.
  *
  *   1. Extensions -> Apps Script from the spreadsheet (a bound script).
  *   2. Paste this file in, replacing everything.
- *   3. Project Settings -> Script Properties -> add DASHBOARD_PASSWORD,
- *      matching the repository secret of the same name.
+ *   3. Project Settings -> Script Properties, add two rows:
+ *        DASHBOARD_PASSWORD   the login password
+ *        DASHBOARD_DATA_KEY   the value of the DASHBOARD_DATA_KEY repo secret
  *   4. Deploy -> New deployment -> Web app
  *        Execute as:      Me
  *        Who has access:  Anyone
- *   5. Check it: open <the /exec URL>?ping=1 in a browser. It should report
- *      sheetFound and passwordConfigured both true.
+ *   5. Check it: open <the /exec URL>?ping=1 in a browser. Everything it
+ *      reports should be true.
  *   6. gh secret set SETTINGS_WEB_APP_URL   (paste the /exec URL)
  */
 
@@ -38,8 +55,20 @@ var SHEET_NAME = 'Settings';
 var KEY_COLUMN = 'Setting';
 var VALUE_COLUMN = 'Value';
 
+var TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000;   // matches "stay signed in"
+var TOKEN_PROPERTY = 'SESSION_TOKENS';
+var MIN_PASSWORD_LENGTH = 8;
+
+function _props() {
+  return PropertiesService.getScriptProperties();
+}
+
 function _password() {
-  return PropertiesService.getScriptProperties().getProperty('DASHBOARD_PASSWORD') || '';
+  return _props().getProperty('DASHBOARD_PASSWORD') || '';
+}
+
+function _dataKey() {
+  return _props().getProperty('DASHBOARD_DATA_KEY') || '';
 }
 
 /** Why a request was refused, so a setup mistake reads as a setup mistake
@@ -47,7 +76,7 @@ function _password() {
 function _authError(given) {
   if (!_password()) {
     return 'DASHBOARD_PASSWORD is not set. Project Settings -> Script Properties -> ' +
-           'add DASHBOARD_PASSWORD with the same value as the repository secret.';
+           'add DASHBOARD_PASSWORD.';
   }
   if (!given) return 'no password sent';
   return 'wrong password';
@@ -63,6 +92,54 @@ function _passwordMatches(given) {
   }
   return diff === 0;
 }
+
+/* ── Sessions ───────────────────────────────────────────────────────────────
+   A token is issued once the password checks out, and the page remembers that
+   instead of the password. So staying signed in never means keeping what
+   someone typed, and changing the password can revoke every session at once. */
+
+function _tokens() {
+  try {
+    return JSON.parse(_props().getProperty(TOKEN_PROPERTY) || '{}');
+  } catch (err) {
+    return {};
+  }
+}
+
+function _saveTokens(map) {
+  _props().setProperty(TOKEN_PROPERTY, JSON.stringify(map));
+}
+
+function _issueToken() {
+  var map = _tokens();
+  var now = Date.now();
+  Object.keys(map).forEach(function (t) { if (map[t] < now) delete map[t]; });
+  var token = Utilities.getUuid().replace(/-/g, '') +
+              Utilities.getUuid().replace(/-/g, '');
+  map[token] = now + TOKEN_TTL_MS;
+  _saveTokens(map);
+  return token;
+}
+
+function _tokenValid(token) {
+  if (!token) return false;
+  var map = _tokens();
+  var expiry = map[token];
+  if (!expiry) return false;
+  if (expiry < Date.now()) {
+    delete map[token];
+    _saveTokens(map);
+    return false;
+  }
+  return true;
+}
+
+/** A caller is authorised by a live token or by the password itself. */
+function _authorised(params) {
+  return _tokenValid(params.token || '') || _passwordMatches(params.password || '');
+}
+
+/* ── Sheet ─────────────────────────────────────────────────────────────── */
 
 function _sheet() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
@@ -89,9 +166,9 @@ function _readAll() {
 }
 
 /**
- * Apply {path: value} to the Value column. Only rows that already exist are
- * touched: the tab is generated from the code's schema, so an unknown key is a
- * stale client rather than a new setting, and silently appending it would
+ * Apply {setting: value} to the Value column. Only rows that already exist are
+ * touched: the tab is generated from the pipeline's schema, so an unknown key
+ * is a stale client rather than a new setting, and silently appending it would
  * create a row nothing ever reads.
  */
 function _applyUpdates(updates) {
@@ -124,45 +201,83 @@ function _applyUpdates(updates) {
   return { applied: applied, unknown: unknown, unchanged: unchanged };
 }
 
-/** JSONP read. Called via a <script> tag, so CORS never applies. */
+/* ── Reads (JSONP — CORS never applies to a <script> tag) ───────────────── */
+
 function doGet(e) {
   var params = (e && e.parameter) || {};
-  var callback = params.callback || 'callback';
   var payload;
   try {
-    // Health check — no password, and no sheet contents. Lets the deployment
-    // be verified in a browser before anything is wired up to it.
-    if (params.ping) {
+    var action = params.action || (params.ping ? 'ping' : 'settings');
+
+    if (action === 'ping') {
+      // No password, and no sheet contents — just enough to verify a fresh
+      // deployment in a browser before anything is wired to it.
       payload = {
         ok: true,
         sheet: SHEET_NAME,
-        sheetFound: Boolean(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME)),
+        sheetFound: Boolean(
+          SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME)),
         passwordConfigured: Boolean(_password()),
-        version: 1
+        dataKeyConfigured: Boolean(_dataKey()),
+        version: 2
       };
-    } else if (!_passwordMatches(params.password || '')) {
-      payload = { ok: false, error: _authError(params.password || '') };
+    } else if (action === 'auth') {
+      // Sign in: check the password, then hand over the data key and a token.
+      if (!_passwordMatches(params.password || '')) {
+        payload = { ok: false, error: _authError(params.password || '') };
+      } else if (!_dataKey()) {
+        payload = { ok: false, error:
+          'DASHBOARD_DATA_KEY is not set in Script Properties, so the data ' +
+          'cannot be decrypted.' };
+      } else {
+        payload = { ok: true, dataKey: _dataKey(), token: _issueToken(),
+                    ttlMs: TOKEN_TTL_MS };
+      }
+    } else if (!_authorised(params)) {
+      payload = { ok: false, error: _authError(params.password || ''),
+                  signedOut: true };
     } else {
-      payload = { ok: true, settings: _readAll(), readAt: new Date().toISOString() };
+      payload = { ok: true, settings: _readAll(),
+                  readAt: new Date().toISOString() };
     }
   } catch (err) {
     payload = { ok: false, error: String(err) };
   }
+
   // Only a bare identifier may be interpolated into the response.
+  var callback = params.callback || 'callback';
   var safe = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(callback) ? callback : 'callback';
   return ContentService
     .createTextOutput(safe + '(' + JSON.stringify(payload) + ');')
     .setMimeType(ContentService.MimeType.JAVASCRIPT);
 }
 
-/** Write. Sent no-cors, so the caller cannot read this response — it confirms
- *  with a follow-up doGet instead. */
+/* ── Writes (sent no-cors; the caller confirms with a follow-up doGet) ──── */
+
 function doPost(e) {
   var result;
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    if (!_passwordMatches(body.password || '')) {
-      result = { ok: false, error: _authError(body.password || '') };
+
+    if (!_authorised(body)) {
+      result = { ok: false, error: _authError(body.password || ''),
+                 signedOut: true };
+    } else if (body.action === 'changePassword') {
+      var next = String(body.newPassword || '');
+      if (next.length < MIN_PASSWORD_LENGTH) {
+        result = { ok: false,
+                   error: 'the new password must be at least ' +
+                          MIN_PASSWORD_LENGTH + ' characters' };
+      } else if (!_passwordMatches(body.currentPassword || '')) {
+        // Changing the password always requires the current one, even when the
+        // caller already holds a valid token — otherwise a borrowed session
+        // could lock its owner out.
+        result = { ok: false, error: 'the current password is not correct' };
+      } else {
+        _props().setProperty('DASHBOARD_PASSWORD', next);
+        _saveTokens({});          // every existing session is now stale
+        result = { ok: true, changed: true, sessionsRevoked: true };
+      }
     } else {
       // One writer at a time: two dashboards saving at once would interleave
       // cell writes and leave a mix of both.
