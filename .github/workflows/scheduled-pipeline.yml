@@ -157,12 +157,21 @@ jobs:
         env:
           KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
           PW: ${{ secrets.DASHBOARD_PASSWORD }}
+          DATA_KEY: ${{ secrets.DASHBOARD_DATA_KEY }}
         run: |
           missing=0
           [ -n "$KEY" ] || { echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; missing=1; }
-          [ -n "$PW" ]  || { echo "::error::DASHBOARD_PASSWORD is not set"; missing=1; }
-          if [ ${#PW} -lt 8 ] && [ -n "$PW" ]; then
-            echo "::error::DASHBOARD_PASSWORD must be at least 8 characters"; missing=1
+
+          # The data key encrypts the published files; the password is only
+          # what people type. Keeping them separate is what lets the password
+          # be changed from the dashboard — changing the key instead would
+          # strand every file already published.
+          if [ -n "$DATA_KEY" ]; then
+            echo "encrypting with DASHBOARD_DATA_KEY (password is changeable from the dashboard)"
+          elif [ -n "$PW" ]; then
+            echo "::warning::DASHBOARD_DATA_KEY is not set — falling back to DASHBOARD_PASSWORD as the key. The password then cannot be changed from the dashboard, because changing it would leave the published files undecryptable."
+          else
+            echo "::error::set DASHBOARD_DATA_KEY (preferred) or DASHBOARD_PASSWORD"; missing=1
           fi
           [ $missing -eq 0 ] || exit 1
           mkdir -p secrets && printf '%s' "$KEY" > secrets/google-service-account.json
@@ -172,7 +181,7 @@ jobs:
 
       - name: Encrypt them
         env:
-          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_DATA_KEY || secrets.DASHBOARD_PASSWORD }}
         run: python -u encrypt_snapshot.py --in site/data --out site/data
 
       - name: Refuse to publish cleartext
