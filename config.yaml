@@ -181,6 +181,19 @@ classification:
   color_rows: true                   # color each row by category
 
 
+# ── Projects (control spreadsheet) ────────────────────────────────────────────
+# One registry sheet lists every project; each project has its own spreadsheet
+# with its own Jobs / Companies / Keywords / Settings tabs. Pick one with
+# --project <id>; with no flag the first active project is used.
+#
+# Adding a project needs no commit here: create a sheet, share it with the
+# service account as Editor, and add a row to the registry.
+control:
+  enabled: true
+  spreadsheet_id: 1opBzNjpVU2RIkRPo_wgcPjgKx6-iZT_ZCrmICA7AjHY
+  worksheet: Projects
+
+
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 google_sheets:
   enabled: true

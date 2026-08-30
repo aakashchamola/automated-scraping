@@ -18,6 +18,7 @@ import sys
 import pandas as pd
 
 import storage
+import projects_registry
 from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from scrapers.glassdoor import GlassdoorScraper
@@ -238,12 +239,14 @@ def parse_args() -> argparse.Namespace:
         default="config.yaml",
         help="Path to YAML or JSON config file (default: config.yaml)",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     cfg = load_config(args.config)
+    projects_registry.resolve(cfg, args.project)
     setup_logging_from_config(cfg)
     logger.info(
         "Logger initialized from config | level=%s",

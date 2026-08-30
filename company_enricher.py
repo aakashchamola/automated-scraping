@@ -24,6 +24,7 @@ import sys
 import time
 import requests
 
+import projects_registry
 from config_loader import load_config
 
 from enricher import config as config_helpers
@@ -816,12 +817,14 @@ def _parse_args() -> argparse.Namespace:
         dest="companies_sheet",
         help="Enrichment output worksheet name (overrides config.yaml google_sheets.enrichment_output_worksheet)",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     config = load_config(args.config)
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config, name="enrich")
     logger.info(
         "Logger initialized from config | level=%s",

@@ -26,6 +26,7 @@ import pandas as pd
 
 import company_enricher
 import job_validator
+import projects_registry
 from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from logger_setup import setup_logging_from_config
@@ -204,12 +205,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Shortcut: run career-page scraping only",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     cfg = load_config(args.config)
+    projects_registry.resolve(cfg, args.project)
     setup_logging_from_config(cfg, name="pipeline")
     cfg = validate_config(cfg)
 

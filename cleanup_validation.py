@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import time
+import projects_registry
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -420,12 +421,20 @@ def _parse_args() -> argparse.Namespace:
         default="cleanup_validation_config.json",
         help="Path to cleanup config (default: cleanup_validation_config.json)",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     cfg = _load_json(args.config)
+    # This tool carries its own JSON config, so the project has to be looked up
+    # from the main config's control block and pushed into the right place.
+    if args.project:
+        project = projects_registry.lookup(args.project)
+        if project:
+            cfg["cleanup_validation"]["google_sheets"]["spreadsheet_id"] = \
+                project["spreadsheet_id"]
     setup_logging_from_config(cfg)
     logger.info(
         "Logger initialized from config | level=%s",

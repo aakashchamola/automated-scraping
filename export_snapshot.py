@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import projects_registry
 from config_loader import load_config
 from logger_setup import setup_logging_from_config
 
@@ -117,9 +118,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Export sheet tabs to static JSON")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--out", default="site/data")
+    projects_registry.add_project_argument(ap)
     args = ap.parse_args()
 
     config = load_config(args.config)
+
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config)
     manifest = export(config, args.out)
 

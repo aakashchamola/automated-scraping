@@ -23,6 +23,7 @@ import argparse
 import logging
 import sys
 
+import projects_registry
 from config_loader import load_config
 from logger_setup import setup_logging_from_config
 from web.settings import SCHEMA, get_path, set_path
@@ -246,9 +247,12 @@ def main() -> None:
     ap.add_argument("--show", action="store_true", help="print what it overrides")
     ap.add_argument("--apply-to", dest="apply_to",
                     help="write the overrides into this config file (used by CI)")
+    projects_registry.add_project_argument(ap)
     args = ap.parse_args()
 
     config = load_config(args.config)
+
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config)
     from google_sheets_store import GoogleSheetsStore
     store = GoogleSheetsStore(config["google_sheets"])

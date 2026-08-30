@@ -33,6 +33,7 @@ import time
 
 import requests
 
+import projects_registry
 from config_loader import load_config
 from logger_setup import setup_logging_from_config
 from scrapers.http_utils import build_session, get_html
@@ -269,12 +270,14 @@ def parse_args() -> argparse.Namespace:
         "--limit", type=int, default=0,
         help="Probe only the first N keywords (0 = use config keywords_limit)",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     config = load_config(args.config)
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config, name="pagination")
 
     # CLI overrides into the config dict so _analysis_cfg picks them up.

@@ -1,28 +1,43 @@
 /**
- * Settings.gs — the published dashboard's server side.
+ * Settings.gs — the published dashboard's server side. STANDALONE, multi-project.
  *
  * The dashboard is a static page on GitHub Pages with no credentials, so it
  * cannot talk to the Sheets API. This Web App is the missing half: it runs as
- * the sheet's owner, checks the login password, and reads and writes the
- * Settings tab.
+ * you, so it can read and write every spreadsheet you own.
  *
- * TWO SECRETS, kept deliberately separate — this is the whole reason the
- * password can be changed from the dashboard:
+ * ── WHY STANDALONE ─────────────────────────────────────────────────────────
+ * The previous version was bound to one spreadsheet and used
+ * getActiveSpreadsheet(). A bound script can only ever see its own container,
+ * which makes more than one project impossible — and in a standalone project
+ * that call returns null, which is the "Cannot read properties of null" error.
+ * Everything here opens sheets by id instead.
  *
- *   DASHBOARD_PASSWORD   what people type to sign in. Lives here, in Script
- *                        Properties, and can be changed from the dashboard,
- *                        because nothing is encrypted with it.
- *   DASHBOARD_DATA_KEY   the key the published data files were encrypted with
- *                        at publish time. Handed to the page only after the
- *                        password checks out. It must never change — every
- *                        already-published file was encrypted with it.
+ * ── THE CONTROL SHEET IS THE DATABASE ──────────────────────────────────────
+ * One registry spreadsheet has a Projects tab listing every project and where
+ * its data lives. Nothing about a project is stored in this file, so adding one
+ * never means editing or redeploying this script.
  *
- * Making the password itself the encryption key (the earlier design) is what
- * made it unchangeable: altering it meant re-encrypting and republishing every
- * file, which a browser cannot do.
+ *   id  name  spreadsheet_id  status  data_key  pw_salt  pw_hash  created_at  notes
  *
- * TWO CORS RULES, both learned the hard way on an earlier project:
+ * Two secrets per project, and they are deliberately different things:
  *
+ *   data_key   encrypts the published dashboard files. Generated once, never
+ *              changed — rotating it would strand every file already published.
+ *              Handed to the browser only after the password checks out.
+ *   pw_hash    what the operator types, salted and iterated. Changeable freely,
+ *              precisely because it is not the data key.
+ *
+ * The password selects the project: there is no project list to browse without
+ * one, so opening the URL reveals no project names.
+ *
+ * ── WHY SERVICE ACCOUNTS CANNOT CREATE THE SHEETS ──────────────────────────
+ * A service account on a consumer Google account has no Drive storage quota, so
+ * creating a spreadsheet as one fails with "storage quota exceeded". This
+ * script runs as you, so it creates each project sheet in YOUR Drive, owned by
+ * you, and then adds the service account as an editor itself. That is why
+ * provisioning lives here and not on the Python side.
+ *
+ * ── TWO CORS RULES, both learned the hard way ──────────────────────────────
  *   1. A Web App's /exec response carries NO Access-Control-Allow-Origin, so a
  *      cors-mode fetch that READS the response fails with ERR_FAILED. Writes
  *      must be sent no-cors (fire-and-forget, response unreadable).
@@ -34,22 +49,31 @@
  * caller can hear.
  *
  * ── SET UP ONCE ────────────────────────────────────────────────────────────
- * It never needs editing again. It reads and writes whatever rows the Settings
- * tab happens to contain, keyed by the Setting column, so adding settings
- * later is a change to that tab — never to this file.
+ * It never needs editing again. Settings are read and written by whatever rows
+ * the Settings tab happens to contain, keyed by the Setting column, so adding
+ * settings later is a change to that tab — never to this file.
  *
- *   1. Extensions -> Apps Script from the spreadsheet (a bound script).
+ *   1. script.google.com -> New project  (NOT Extensions -> Apps Script, which
+ *      would create a bound script again).
  *   2. Paste this file in, replacing everything.
- *   3. Project Settings -> Script Properties, add two rows:
- *        DASHBOARD_PASSWORD   the login password
- *        DASHBOARD_DATA_KEY   the value of the DASHBOARD_DATA_KEY repo secret
+ *   3. Project Settings -> Script Properties:
+ *        CONTROL_SHEET_ID    id of the registry spreadsheet   (required)
+ *        SERVICE_ACCOUNT     the service account's email      (recommended)
+ *        PROJECTS_FOLDER_ID  Drive folder for new sheets      (optional)
+ *        ADMIN_PASSWORD      required to create projects      (optional)
  *   4. Deploy -> New deployment -> Web app
  *        Execute as:      Me
  *        Who has access:  Anyone
- *   5. Check it: open <the /exec URL>?ping=1 in a browser. Everything it
- *      reports should be true.
- *   6. gh secret set SETTINGS_WEB_APP_URL   (paste the /exec URL)
+ *   5. Authorise it. Because it is standalone it asks for Drive and Sheets
+ *      access, so Google shows "Google hasn't verified this app" —
+ *      Advanced -> Go to <name> (unsafe). It is your own script.
+ *   6. Check it: open <the /exec URL>?ping=1 in a browser.
+ *   7. gh secret set SETTINGS_WEB_APP_URL   (paste the /exec URL)
  */
+
+var CONTROL_TAB = 'Projects';
+var CONTROL_HEADER = ['id', 'name', 'spreadsheet_id', 'status', 'data_key',
+                      'pw_salt', 'pw_hash', 'created_at', 'notes'];
 
 var SHEET_NAME = 'Settings';
 var KEY_COLUMN = 'Setting';
@@ -64,44 +88,145 @@ var TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000;   // matches "stay signed in"
 var TOKEN_PROPERTY = 'SESSION_TOKENS';
 var MIN_PASSWORD_LENGTH = 8;
 
+// Kept in step with HASH_ROUNDS in projects_registry.py. Changing it
+// invalidates every stored hash, so it is a constant, not a setting.
+var HASH_ROUNDS = 1000;
+
+// Tabs a brand-new project starts with. Headers only — the Settings rows are
+// filled in by the pipeline on its first run, from the schema it already owns,
+// so a new setting in the code never means editing this list.
+var PROJECT_TEMPLATE = [
+  { name: 'Jobs',      header: ['Company', 'Role', 'Location', 'Platform', 'Job Link', 'Keyword'] },
+  { name: 'Company',   header: ['Company', 'Avg. Employee-Count', 'Career-Page', 'Linkedin-Url', 'Job Link'] },
+  { name: 'Companies', header: ['Company', 'Avg. Employee-Count', 'Career-Page', 'Linkedin-Url', 'Job Link'] },
+  { name: 'Keywords',  header: [KEYWORDS_COLUMN] },
+  { name: 'Settings',  header: ['Group', 'Setting', 'Value', 'Type', 'Options', 'Description'] }
+];
+
+
 function _props() {
   return PropertiesService.getScriptProperties();
 }
 
-function _password() {
-  return _props().getProperty('DASHBOARD_PASSWORD') || '';
+function _controlId() {
+  return _props().getProperty('CONTROL_SHEET_ID') || '';
 }
 
-function _dataKey() {
-  return _props().getProperty('DASHBOARD_DATA_KEY') || '';
+function _serviceAccount() {
+  return _props().getProperty('SERVICE_ACCOUNT') || '';
 }
 
-/** Why a request was refused, so a setup mistake reads as a setup mistake
- *  rather than as "wrong password" forever. */
-function _authError(given) {
-  if (!_password()) {
-    return 'DASHBOARD_PASSWORD is not set. Project Settings -> Script Properties -> ' +
-           'add DASHBOARD_PASSWORD.';
+function _adminPassword() {
+  return _props().getProperty('ADMIN_PASSWORD') || '';
+}
+
+
+/* ── Password hashing ───────────────────────────────────────────────────────
+   Salted, iterated SHA-256 over hex strings — hex at every step, rather than
+   raw bytes, so this matches projects_registry.py exactly without any
+   byte-signedness games. It is not PBKDF2 because Apps Script has no PBKDF2;
+   that is an acceptable trade only because the hash lives in a private
+   spreadsheet whose reader can already read every project's data directly. */
+
+function _sha256Hex(text) {
+  var bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8);
+  var hex = '';
+  for (var i = 0; i < bytes.length; i++) {
+    // computeDigest returns signed bytes; mask back to 0-255 before hexing.
+    var b = (bytes[i] + 256) % 256;
+    hex += (b < 16 ? '0' : '') + b.toString(16);
   }
-  if (!given) return 'no password sent';
-  return 'wrong password';
+  return hex;
 }
 
-/** Constant-time-ish comparison so a wrong password cannot be found by timing. */
-function _passwordMatches(given) {
-  var expected = _password();
-  if (!expected || !given || given.length !== expected.length) return false;
+function _hashPassword(password, salt) {
+  var digest = _sha256Hex(salt + ':' + password);
+  for (var i = 1; i < HASH_ROUNDS; i++) digest = _sha256Hex(digest);
+  return digest;
+}
+
+/** Constant-time comparison so a wrong value cannot be found by timing. */
+function _constantTimeEquals(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
   var diff = 0;
-  for (var i = 0; i < expected.length; i++) {
-    diff |= expected.charCodeAt(i) ^ given.charCodeAt(i);
-  }
+  for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
+
+function _passwordMatches(project, given) {
+  if (!project || !given) return false;
+  if (!project.pw_hash || !project.pw_salt) return false;
+  return _constantTimeEquals(project.pw_hash, _hashPassword(given, project.pw_salt));
+}
+
+
+/* ── The control sheet ──────────────────────────────────────────────────── */
+
+function _controlSheet() {
+  var id = _controlId();
+  if (!id) {
+    throw new Error('CONTROL_SHEET_ID is not set. Project Settings -> ' +
+                    'Script Properties -> add CONTROL_SHEET_ID.');
+  }
+  var sheet = SpreadsheetApp.openById(id).getSheetByName(CONTROL_TAB);
+  if (!sheet) throw new Error("the control spreadsheet has no '" + CONTROL_TAB + "' tab");
+  return sheet;
+}
+
+/** Every project row, with its 1-based sheet row number attached. */
+function _projects() {
+  var values = _controlSheet().getDataRange().getValues();
+  if (!values.length) return [];
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var row = {};
+    for (var c = 0; c < header.length; c++) {
+      if (header[c]) row[header[c]] = String(values[r][c]);
+    }
+    if (!String(row.id || '').trim()) continue;
+    row._row = r + 1;
+    out.push(row);
+  }
+  return out;
+}
+
+function _activeProjects() {
+  return _projects().filter(function (p) {
+    return String(p.status || '').toLowerCase() !== 'archived';
+  });
+}
+
+function _projectById(id) {
+  var wanted = String(id || '').trim().toLowerCase();
+  var found = _projects().filter(function (p) {
+    return String(p.id).trim().toLowerCase() === wanted;
+  });
+  return found.length ? found[0] : null;
+}
+
+/**
+ * The project a password unlocks, or null.
+ *
+ * Every active project is checked even after a match, so the time taken does
+ * not reveal how far down the list the answer was.
+ */
+function _projectByPassword(password) {
+  if (!password) return null;
+  var found = null;
+  _activeProjects().forEach(function (p) {
+    if (_passwordMatches(p, password) && found === null) found = p;
+  });
+  return found;
+}
+
 
 /* ── Sessions ───────────────────────────────────────────────────────────────
    A token is issued once the password checks out, and the page remembers that
    instead of the password. So staying signed in never means keeping what
-   someone typed, and changing the password can revoke every session at once. */
+   someone typed. Each token is bound to one project — holding a session for
+   one project grants nothing on another. */
 
 function _tokens() {
   try {
@@ -115,45 +240,85 @@ function _saveTokens(map) {
   _props().setProperty(TOKEN_PROPERTY, JSON.stringify(map));
 }
 
-function _issueToken() {
+function _issueToken(projectId) {
   var map = _tokens();
   var now = Date.now();
-  Object.keys(map).forEach(function (t) { if (map[t] < now) delete map[t]; });
+  Object.keys(map).forEach(function (t) {
+    if (!map[t] || map[t].exp < now) delete map[t];
+  });
   var token = Utilities.getUuid().replace(/-/g, '') +
               Utilities.getUuid().replace(/-/g, '');
-  map[token] = now + TOKEN_TTL_MS;
+  map[token] = { exp: now + TOKEN_TTL_MS, project: projectId };
   _saveTokens(map);
   return token;
 }
 
-function _tokenValid(token) {
-  if (!token) return false;
+/** The project id a token is good for, or ''. */
+function _tokenProject(token) {
+  if (!token) return '';
   var map = _tokens();
-  var expiry = map[token];
-  if (!expiry) return false;
-  if (expiry < Date.now()) {
+  var entry = map[token];
+  if (!entry) return '';
+  if (entry.exp < Date.now()) {
     delete map[token];
     _saveTokens(map);
-    return false;
+    return '';
   }
-  return true;
+  return entry.project || '';
 }
 
-/** A caller is authorised by a live token or by the password itself. */
-function _authorised(params) {
-  return _tokenValid(params.token || '') || _passwordMatches(params.password || '');
+function _revokeProjectTokens(projectId) {
+  var map = _tokens();
+  Object.keys(map).forEach(function (t) {
+    if (map[t] && map[t].project === projectId) delete map[t];
+  });
+  _saveTokens(map);
 }
 
-/* ── Sheet ─────────────────────────────────────────────────────────────── */
+/**
+ * The project this request is authorised for, or null.
+ *
+ * A live token is the normal path; the password is accepted directly so that a
+ * caller which has not signed in yet still works in one round trip.
+ */
+function _authorise(params) {
+  var viaToken = _tokenProject(params.token || '');
+  if (viaToken) {
+    var project = _projectById(viaToken);
+    if (project) return project;
+  }
+  return _projectByPassword(params.password || '');
+}
 
-function _sheet() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  if (!sheet) throw new Error("no '" + SHEET_NAME + "' tab in this spreadsheet");
+/** Why a request was refused, so a setup mistake reads as a setup mistake. */
+function _authError(params) {
+  if (!_controlId()) {
+    return 'CONTROL_SHEET_ID is not set. Project Settings -> Script Properties ' +
+           '-> add CONTROL_SHEET_ID.';
+  }
+  if (!_activeProjects().length) {
+    return 'the control sheet lists no active projects';
+  }
+  if (!(params.password || params.token)) return 'no password sent';
+  return 'no project matched that password';
+}
+
+
+/* ── A project's own sheets ─────────────────────────────────────────────── */
+
+function _projectSheet(project, name) {
+  if (!project.spreadsheet_id) {
+    throw new Error("project '" + project.id + "' has no spreadsheet_id");
+  }
+  var sheet = SpreadsheetApp.openById(project.spreadsheet_id).getSheetByName(name);
+  if (!sheet) {
+    throw new Error("no '" + name + "' tab in the sheet for project '" + project.id + "'");
+  }
   return sheet;
 }
 
-function _readAll() {
-  var values = _sheet().getDataRange().getValues();
+function _readAll(project) {
+  var values = _projectSheet(project, SHEET_NAME).getDataRange().getValues();
   if (!values.length) return { columns: [], rows: [] };
   var header = values[0].map(function (h) { return String(h).trim(); });
   var rows = [];
@@ -176,8 +341,8 @@ function _readAll() {
  * is a stale client rather than a new setting, and silently appending it would
  * create a row nothing ever reads.
  */
-function _applyUpdates(updates) {
-  var sheet = _sheet();
+function _applyUpdates(project, updates) {
+  var sheet = _projectSheet(project, SHEET_NAME);
   var values = sheet.getDataRange().getValues();
   var header = values[0].map(function (h) { return String(h).trim(); });
   var keyAt = header.indexOf(KEY_COLUMN);
@@ -206,19 +371,14 @@ function _applyUpdates(updates) {
   return { applied: applied, unknown: unknown, unchanged: unchanged };
 }
 
+
 /* ── Keywords ───────────────────────────────────────────────────────────────
    A plain list rather than key/value, so it is read and written as a whole
    column. Only that one column is touched: the tab carries per-platform
    columns beside it that nothing here should disturb. */
 
-function _keywordSheet() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(KEYWORDS_SHEET);
-  if (!sheet) throw new Error("no '" + KEYWORDS_SHEET + "' tab in this spreadsheet");
-  return sheet;
-}
-
-function _readKeywords() {
-  var sheet = _keywordSheet();
+function _readKeywords(project) {
+  var sheet = _projectSheet(project, KEYWORDS_SHEET);
   var values = sheet.getDataRange().getValues();
   if (!values.length) return { keywords: [] };
   var header = values[0].map(function (h) { return String(h).trim(); });
@@ -242,7 +402,7 @@ function _readKeywords() {
  * the rows being deleted, so the neighbouring per-platform columns keep their
  * alignment with whatever is left.
  */
-function _writeKeywords(list) {
+function _writeKeywords(project, list) {
   var clean = [];
   (list || []).forEach(function (raw) {
     var term = String(raw || '').trim();
@@ -251,7 +411,7 @@ function _writeKeywords(list) {
   });
   if (!clean.length) throw new Error('refusing to leave the Keywords tab empty');
 
-  var sheet = _keywordSheet();
+  var sheet = _projectSheet(project, KEYWORDS_SHEET);
   var values = sheet.getDataRange().getValues();
   var header = values[0].map(function (h) { return String(h).trim(); });
   var at = header.indexOf(KEYWORDS_COLUMN);
@@ -265,13 +425,173 @@ function _writeKeywords(list) {
   for (var i = 0; i < needed; i++) {
     column.push([i < clean.length ? clean[i] : '']);
   }
-  if (needed > previous) {
-    var missing = needed - previous;
-    if (sheet.getMaxRows() < needed + 1) sheet.insertRowsAfter(sheet.getMaxRows(), missing);
+  if (sheet.getMaxRows() < needed + 1) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), needed + 1 - sheet.getMaxRows());
   }
   sheet.getRange(2, at + 1, needed, 1).setValues(column);
   return { count: clean.length, cleared: Math.max(0, previous - clean.length) };
 }
+
+
+/* ── Creating a project ─────────────────────────────────────────────────────
+   Everything a new project needs, in one call: the spreadsheet, its tabs, the
+   service account's editor grant, and the registry row. Nothing is left for
+   anyone to do by hand in the Drive UI. */
+
+function _randomKey() {
+  // Two UUIDs of entropy, base64 without padding — the same shape as
+  // secrets.token_urlsafe(32) on the Python side.
+  var raw = Utilities.getUuid().replace(/-/g, '') +
+            Utilities.getUuid().replace(/-/g, '');
+  return Utilities.base64EncodeWebSafe(raw).replace(/=+$/, '');
+}
+
+function _slugify(name) {
+  var slug = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+             .replace(/^-+|-+$/g, '');
+  return (slug || 'project').substring(0, 32);
+}
+
+function _uniqueId(base) {
+  var candidate = base, n = 2;
+  while (_projectById(candidate)) {
+    candidate = (base + '-' + n).substring(0, 32);
+    n++;
+  }
+  return candidate;
+}
+
+/** Add any missing template tab, and give a tab a header if it has none. */
+function _ensureTemplateTabs(spreadsheet) {
+  PROJECT_TEMPLATE.forEach(function (tpl) {
+    var sheet = spreadsheet.getSheetByName(tpl.name);
+    if (!sheet) sheet = spreadsheet.insertSheet(tpl.name);
+    var first = sheet.getRange(1, 1, 1, tpl.header.length).getValues()[0];
+    var empty = first.every(function (v) { return !String(v).trim(); });
+    if (empty) {
+      sheet.getRange(1, 1, 1, tpl.header.length).setValues([tpl.header]);
+      sheet.setFrozenRows(1);
+    }
+  });
+  // A brand-new spreadsheet arrives with a stray "Sheet1" that nothing uses.
+  var stray = spreadsheet.getSheetByName('Sheet1');
+  if (stray && spreadsheet.getSheets().length > 1 && stray.getLastRow() === 0) {
+    spreadsheet.deleteSheet(stray);
+  }
+}
+
+function _createProject(body) {
+  var name = String(body.name || '').trim();
+  if (!name) throw new Error('a project name is required');
+  var password = String(body.password || '');
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error('the password must be at least ' + MIN_PASSWORD_LENGTH +
+                    ' characters');
+  }
+  if (_projectByPassword(password)) {
+    // The password is what selects the project, so a duplicate would make one
+    // of the two permanently unreachable.
+    throw new Error('another project already uses that password');
+  }
+
+  var projectId = _uniqueId(_slugify(body.id || name));
+  var spreadsheetId = String(body.spreadsheetId || '').trim();
+  var created = false;
+  var url = '';
+
+  if (spreadsheetId) {
+    // Adopting a sheet that already exists — open it before a registry row
+    // promises that it can be opened.
+    var existing = SpreadsheetApp.openById(spreadsheetId);
+    url = existing.getUrl();
+    _ensureTemplateTabs(existing);
+  } else {
+    var fresh = SpreadsheetApp.create('Automation — ' + name);
+    spreadsheetId = fresh.getId();
+    url = fresh.getUrl();
+    created = true;
+    _ensureTemplateTabs(fresh);
+
+    var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+    if (folderId) {
+      try {
+        var file = DriveApp.getFileById(spreadsheetId);
+        DriveApp.getFolderById(folderId).addFile(file);
+        DriveApp.getRootFolder().removeFile(file);
+      } catch (err) {
+        // A bad folder id must not lose a sheet that was created successfully.
+        Logger.log('could not file the new sheet: ' + err);
+      }
+    }
+  }
+
+  // The pipeline reads and writes this sheet as the service account, so it
+  // needs editor rights. Doing it here is the whole reason provisioning lives
+  // in this script: a service account cannot create the file itself.
+  var shared = '';
+  var serviceAccount = _serviceAccount();
+  if (serviceAccount) {
+    try {
+      DriveApp.getFileById(spreadsheetId).addEditor(serviceAccount);
+      shared = serviceAccount;
+    } catch (err) {
+      throw new Error('the sheet was created but sharing it with ' +
+        serviceAccount + ' failed, so the automation cannot reach it: ' + err);
+    }
+  }
+
+  var salt = _randomKey().substring(0, 32);
+  var record = {
+    id: projectId,
+    name: name,
+    spreadsheet_id: spreadsheetId,
+    status: 'active',
+    data_key: _randomKey(),
+    pw_salt: salt,
+    pw_hash: _hashPassword(password, salt),
+    created_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+    notes: String(body.notes || '')
+  };
+
+  var control = _controlSheet();
+  var header = control.getRange(1, 1, 1, Math.max(control.getLastColumn(), 1))
+               .getValues()[0].map(function (h) { return String(h).trim(); });
+  if (!header.length || !header[0]) {
+    control.getRange(1, 1, 1, CONTROL_HEADER.length).setValues([CONTROL_HEADER]);
+    control.setFrozenRows(1);
+    header = CONTROL_HEADER;
+  }
+  control.appendRow(header.map(function (col) {
+    return record.hasOwnProperty(col) ? record[col] : '';
+  }));
+
+  return {
+    project: projectId, name: name, spreadsheetId: spreadsheetId,
+    url: url, createdSheet: created, sharedWith: shared
+  };
+}
+
+/**
+ * Who may create a project.
+ *
+ * With ADMIN_PASSWORD set, only that password may; without it, any signed-in
+ * session may, which is the right default while you are the only operator.
+ * Set it once you hand a project password to someone else.
+ */
+function _authoriseAdmin(body) {
+  var admin = _adminPassword();
+  if (admin) {
+    if (!_constantTimeEquals(admin, String(body.adminPassword || ''))) {
+      return { ok: false, error: 'the admin password is not correct' };
+    }
+    return { ok: true };
+  }
+  if (!_authorise(body)) {
+    return { ok: false, error: _authError(body), signedOut: true };
+  }
+  return { ok: true };
+}
+
 
 /* ── Reads (JSONP — CORS never applies to a <script> tag) ───────────────── */
 
@@ -284,38 +604,65 @@ function doGet(e) {
     if (action === 'ping') {
       // No password, and no sheet contents — just enough to verify a fresh
       // deployment in a browser before anything is wired to it.
+      var controlId = _controlId();
+      var count = 0;
+      var controlError = '';
+      try {
+        count = _activeProjects().length;
+      } catch (err) {
+        controlError = String(err);
+      }
       payload = {
-        ok: true,
-        sheet: SHEET_NAME,
-        sheetFound: Boolean(
-          SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME)),
-        passwordConfigured: Boolean(_password()),
-        dataKeyConfigured: Boolean(_dataKey()),
-        keywordsFound: Boolean(
-          SpreadsheetApp.getActiveSpreadsheet().getSheetByName(KEYWORDS_SHEET)),
-        version: 3
+        ok: !controlError && Boolean(controlId),
+        version: 4,
+        standalone: true,
+        controlSheetConfigured: Boolean(controlId),
+        controlSheetReadable: Boolean(controlId) && !controlError,
+        // A count, never the names: the landing page must not disclose which
+        // projects exist to someone who has no password.
+        activeProjects: count,
+        serviceAccountConfigured: Boolean(_serviceAccount()),
+        adminPasswordConfigured: Boolean(_adminPassword()),
+        runsAs: Session.getEffectiveUser().getEmail(),
+        error: controlError || undefined
       };
+
     } else if (action === 'auth') {
-      // Sign in: check the password, then hand over the data key and a token.
-      if (!_passwordMatches(params.password || '')) {
-        payload = { ok: false, error: _authError(params.password || '') };
-      } else if (!_dataKey()) {
+      // Sign in: the password selects the project, then the data key and a
+      // token bound to that project are handed over.
+      var project = _projectByPassword(params.password || '');
+      if (!project) {
+        payload = { ok: false, error: _authError(params) };
+      } else if (!project.data_key) {
         payload = { ok: false, error:
-          'DASHBOARD_DATA_KEY is not set in Script Properties, so the data ' +
-          'cannot be decrypted.' };
+          "project '" + project.id + "' has no data_key in the control sheet, " +
+          'so its published data cannot be decrypted.' };
       } else {
-        payload = { ok: true, dataKey: _dataKey(), token: _issueToken(),
+        payload = { ok: true, project: project.id, name: project.name,
+                    dataKey: project.data_key, token: _issueToken(project.id),
                     ttlMs: TOKEN_TTL_MS };
       }
-    } else if (!_authorised(params)) {
-      payload = { ok: false, error: _authError(params.password || ''),
-                  signedOut: true };
-    } else if (action === 'keywords') {
-      payload = { ok: true, keywords: _readKeywords(),
-                  readAt: new Date().toISOString() };
+
     } else {
-      payload = { ok: true, settings: _readAll(),
-                  readAt: new Date().toISOString() };
+      var authed = _authorise(params);
+      if (!authed) {
+        payload = { ok: false, error: _authError(params), signedOut: true };
+      } else if (params.project &&
+                 String(params.project).toLowerCase() !== String(authed.id).toLowerCase()) {
+        // A session is good for its own project only.
+        payload = { ok: false, error: 'that session is not valid for project ' +
+                    params.project, signedOut: true };
+      } else if (action === 'keywords') {
+        payload = { ok: true, project: authed.id, keywords: _readKeywords(authed),
+                    readAt: new Date().toISOString() };
+      } else if (action === 'project') {
+        payload = { ok: true, project: authed.id, name: authed.name,
+                    spreadsheetId: authed.spreadsheet_id,
+                    createdAt: authed.created_at, notes: authed.notes };
+      } else {
+        payload = { ok: true, project: authed.id, settings: _readAll(authed),
+                    readAt: new Date().toISOString() };
+      }
     }
   } catch (err) {
     payload = { ok: false, error: String(err) };
@@ -329,6 +676,7 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JAVASCRIPT);
 }
 
+
 /* ── Writes (sent no-cors; the caller confirms with a follow-up doGet) ──── */
 
 function doPost(e) {
@@ -336,45 +684,78 @@ function doPost(e) {
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
 
-    if (!_authorised(body)) {
-      result = { ok: false, error: _authError(body.password || ''),
-                 signedOut: true };
+    if (body.action === 'createProject') {
+      var allowed = _authoriseAdmin(body);
+      if (!allowed.ok) {
+        result = allowed;
+      } else {
+        var createLock = LockService.getScriptLock();
+        createLock.waitLock(30000);
+        try {
+          result = _createProject(body);
+          result.ok = true;
+        } finally {
+          createLock.releaseLock();
+        }
+      }
+      return _json(result);
+    }
+
+    var project = _authorise(body);
+    if (!project) {
+      result = { ok: false, error: _authError(body), signedOut: true };
+
     } else if (body.action === 'changePassword') {
       var next = String(body.newPassword || '');
       if (next.length < MIN_PASSWORD_LENGTH) {
         result = { ok: false,
                    error: 'the new password must be at least ' +
                           MIN_PASSWORD_LENGTH + ' characters' };
-      } else if (!_passwordMatches(body.currentPassword || '')) {
+      } else if (!_passwordMatches(project, body.currentPassword || '')) {
         // Changing the password always requires the current one, even when the
         // caller already holds a valid token — otherwise a borrowed session
         // could lock its owner out.
         result = { ok: false, error: 'the current password is not correct' };
+      } else if (_projectByPassword(next)) {
+        result = { ok: false, error: 'another project already uses that password' };
       } else {
-        _props().setProperty('DASHBOARD_PASSWORD', next);
-        _saveTokens({});          // every existing session is now stale
-        result = { ok: true, changed: true, sessionsRevoked: true };
+        var salt = _randomKey().substring(0, 32);
+        var control = _controlSheet();
+        var header = control.getRange(1, 1, 1, control.getLastColumn()).getValues()[0]
+                     .map(function (h) { return String(h).trim(); });
+        control.getRange(project._row, header.indexOf('pw_salt') + 1).setValue(salt);
+        control.getRange(project._row, header.indexOf('pw_hash') + 1)
+               .setValue(_hashPassword(next, salt));
+        _revokeProjectTokens(project.id);   // every existing session is now stale
+        result = { ok: true, changed: true, sessionsRevoked: true,
+                   project: project.id };
       }
+
     } else {
       // One writer at a time: two dashboards saving at once would interleave
       // cell writes and leave a mix of both.
-      var lock = LockService.getScriptLock();
-      lock.waitLock(20000);
+      var writeLock = LockService.getScriptLock();
+      writeLock.waitLock(20000);
       try {
         if (body.action === 'saveKeywords') {
-          result = _writeKeywords(body.keywords || []);
+          result = _writeKeywords(project, body.keywords || []);
         } else {
-          result = _applyUpdates(body.updates || {});
+          result = _applyUpdates(project, body.updates || {});
         }
         result.ok = true;
+        result.project = project.id;
       } finally {
-        lock.releaseLock();
+        writeLock.releaseLock();
       }
     }
   } catch (err) {
     result = { ok: false, error: String(err) };
   }
+  return _json(result);
+}
+
+function _json(value) {
   return ContentService
-    .createTextOutput(JSON.stringify(result))
+    .createTextOutput(JSON.stringify(value))
     .setMimeType(ContentService.MimeType.JSON);
 }

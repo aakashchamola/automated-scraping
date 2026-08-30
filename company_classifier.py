@@ -32,6 +32,7 @@ import os
 import re
 import sys
 
+import projects_registry
 from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from logger_setup import setup_logging_from_config
@@ -300,12 +301,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--source", default=None, help="Worksheet to classify")
     parser.add_argument("--dry-run", action="store_true", help="Classify + log, do not write")
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     config = load_config(args.config)
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config, name="classify")
     gs_config = config.get("google_sheets", {})
     if not gs_config.get("enabled"):

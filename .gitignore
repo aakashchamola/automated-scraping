@@ -31,3 +31,6 @@ site/data/
 
 # Stable AES key for the published data — never commit
 .dashboard-data-key.txt
+
+# personal launcher, not part of the project
+a-startup

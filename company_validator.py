@@ -25,6 +25,7 @@ import argparse
 import logging
 import sys
 
+import projects_registry
 from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from logger_setup import setup_logging_from_config
@@ -238,12 +239,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Enrichment output worksheet name (default: google_sheets.enrichment_output_worksheet)",
     )
+    projects_registry.add_project_argument(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     config = load_config(args.config)
+    projects_registry.resolve(config, args.project)
     setup_logging_from_config(config, name="company_validate")
     gs_config = config.get("google_sheets", {})
 
