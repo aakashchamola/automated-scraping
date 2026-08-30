@@ -17,15 +17,21 @@
  * So: doPost writes and says nothing useful; doGet serves JSONP for reading
  * and confirming.
  *
- * Setup
+ * Set up ONCE. It never needs editing again: it reads and writes whatever rows
+ * the Settings tab happens to contain, keyed by the Setting column, so adding
+ * or removing settings later is a change to that tab and to the pipeline's
+ * schema — never to this file.
+ *
  *   1. Extensions -> Apps Script from the spreadsheet (a bound script).
- *   2. Paste this file in.
+ *   2. Paste this file in, replacing everything.
  *   3. Project Settings -> Script Properties -> add DASHBOARD_PASSWORD,
  *      matching the repository secret of the same name.
  *   4. Deploy -> New deployment -> Web app
  *        Execute as:      Me
  *        Who has access:  Anyone
- *      Copy the /exec URL and store it as the SETTINGS_WEB_APP_URL secret.
+ *   5. Check it: open <the /exec URL>?ping=1 in a browser. It should report
+ *      sheetFound and passwordConfigured both true.
+ *   6. gh secret set SETTINGS_WEB_APP_URL   (paste the /exec URL)
  */
 
 var SHEET_NAME = 'Settings';
@@ -34,6 +40,17 @@ var VALUE_COLUMN = 'Value';
 
 function _password() {
   return PropertiesService.getScriptProperties().getProperty('DASHBOARD_PASSWORD') || '';
+}
+
+/** Why a request was refused, so a setup mistake reads as a setup mistake
+ *  rather than as "wrong password" forever. */
+function _authError(given) {
+  if (!_password()) {
+    return 'DASHBOARD_PASSWORD is not set. Project Settings -> Script Properties -> ' +
+           'add DASHBOARD_PASSWORD with the same value as the repository secret.';
+  }
+  if (!given) return 'no password sent';
+  return 'wrong password';
 }
 
 /** Constant-time-ish comparison so a wrong password cannot be found by timing. */
@@ -113,8 +130,18 @@ function doGet(e) {
   var callback = params.callback || 'callback';
   var payload;
   try {
-    if (!_passwordMatches(params.password || '')) {
-      payload = { ok: false, error: 'wrong password' };
+    // Health check — no password, and no sheet contents. Lets the deployment
+    // be verified in a browser before anything is wired up to it.
+    if (params.ping) {
+      payload = {
+        ok: true,
+        sheet: SHEET_NAME,
+        sheetFound: Boolean(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME)),
+        passwordConfigured: Boolean(_password()),
+        version: 1
+      };
+    } else if (!_passwordMatches(params.password || '')) {
+      payload = { ok: false, error: _authError(params.password || '') };
     } else {
       payload = { ok: true, settings: _readAll(), readAt: new Date().toISOString() };
     }
@@ -135,7 +162,7 @@ function doPost(e) {
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     if (!_passwordMatches(body.password || '')) {
-      result = { ok: false, error: 'wrong password' };
+      result = { ok: false, error: _authError(body.password || '') };
     } else {
       // One writer at a time: two dashboards saving at once would interleave
       // cell writes and leave a mix of both.

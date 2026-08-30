@@ -62,6 +62,53 @@ Two guards back this up: the publish job **refuses to deploy** if any cleartext
 JSON is left in `site/data`, and it deletes the service-account key from the
 runner before the upload step.
 
+## Editing settings from the published page
+
+The Settings tab of the spreadsheet is the source of truth. The published page
+edits it through one Apps Script Web App bound to that spreadsheet — set up
+once, never touched again.
+
+```bash
+# 1. Spreadsheet -> Extensions -> Apps Script, paste apps-script/Settings.gs
+# 2. Project Settings -> Script Properties -> DASHBOARD_PASSWORD = <the password>
+# 3. Deploy -> New deployment -> Web app  (Execute as: Me, Access: Anyone)
+# 4. Check it: open <exec-url>?ping=1  -> sheetFound and passwordConfigured true
+gh secret set SETTINGS_WEB_APP_URL     # 5. paste the /exec URL
+```
+
+Then run *publish-only* once. Until that is done the panel stays read-only and
+says so; nothing else changes.
+
+### Adding a setting later needs no script change
+
+The Web App is schema-agnostic: it reads and writes whatever rows the Settings
+tab happens to contain, keyed by the `Setting` column. Adding a setting is:
+
+1. add the field to `SCHEMA` in `web/settings.py`
+2. `python settings_sheet.py --seed` — appends the row, keeping existing values
+
+That is all. `Settings.gs` is untouched, and so is the page, which builds its
+controls from the tab's own `Type` and `Options` columns. A type the page does
+not recognise falls back to a text box rather than disappearing.
+
+### Why a Web App rather than the service-account key
+
+The service account already has writer access and does all the pipeline's
+writing — but its key is a private RSA key, and the page is a public URL.
+Putting the key in the page would hand every visitor permanent read/write on
+the whole spreadsheet. The Web App is the same arrangement the service account
+has in CI (authority held server-side, caller proves itself with a password),
+made reachable from a browser.
+
+Two constraints shape the exchange, both established the hard way:
+
+- A Web App's `/exec` response carries no `Access-Control-Allow-Origin`, so a
+  cors-mode fetch that reads the response fails outright. Saves go out
+  `no-cors` — fire-and-forget, response unreadable.
+- Because the save's own answer cannot be read, the page confirms by reading
+  back over JSONP, which CORS does not apply to. A setting that did not stick
+  is reported as such rather than shown as an optimistic success.
+
 ## Pressing Run
 
 The Run tab lists the automations, and each button opens GitHub's own **Run
