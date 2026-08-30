@@ -33,6 +33,15 @@ created in your Drive and owned by you.
 To adopt a spreadsheet you already have, put its id in **Use a spreadsheet I
 already have**. Missing tabs are added; existing ones are left alone.
 
+⚠️ **An adopted sheet must also be shared with the Google account the Apps
+Script runs as**, as an Editor. Sharing it with the service account is not
+enough — that only lets the *pipeline* reach it, not the Settings service, and
+the two are different identities (see "Two identities" below). A sheet the
+script cannot open fails with *"You do not have permission to access the
+requested document"*, served by Google as an HTML page that the script cannot
+catch and turn into a readable error. Sheets created through the dialog are
+owned by that account already, so this only applies to ones you adopt.
+
 ## Running one
 
 ```bash
@@ -116,4 +125,9 @@ Two different accounts touch the sheets, and they are granted separately:
 | Who | How it gets access | Used by |
 |---|---|---|
 | the service account | shared as Editor on each sheet — done for you when a project is created | the Python pipeline, publishing |
-| you | you own the sheets | the Apps Script, which runs as you |
+| the Apps Script's account | owns sheets it creates; must be shared into ones you adopt | Settings, Keywords, creating projects |
+
+They are granted separately, and a sheet reachable by one is not automatically
+reachable by the other. The usual symptom is a project whose data publishes
+perfectly but whose Settings panel will not load: that is the pipeline
+succeeding as the service account while the Settings service is locked out.
