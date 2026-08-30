@@ -158,17 +158,31 @@ let SESSION_TOKEN = null;
    the password. */
 async function unlock(password, remember) {
   const payload = await fetchPayload('index');
-  let key;
+  let key = null;
+  SESSION_TOKEN = null;
 
   if (SETTINGS_URL) {
-    const auth = await jsonp(
-      `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
-    if (!auth.ok) throw new AuthError(auth.error || 'sign-in was refused');
-    key = await deriveKey(auth.dataKey, payload.kdf);
-    SESSION_TOKEN = auth.token;
-  } else {
-    key = await deriveKey(password, payload.kdf);
+    let auth = null;
+    try {
+      auth = await jsonp(
+        `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+    } catch (err) {
+      auth = { ok: false, error: err.message, unreachable: true };
+    }
+    if (auth.ok) {
+      key = await deriveKey(auth.dataKey, payload.kdf);
+      SESSION_TOKEN = auth.token;
+    } else if (auth.error && /wrong password|no password sent/i.test(auth.error)) {
+      // The service is working and says no. Believe it.
+      throw new AuthError('Wrong password.');
+    }
+    // Anything else — service unreachable, properties not configured yet, a
+    // deployment mid-change — must not brick the page. Fall through and try
+    // the password as the key, which is how the site works with no service at
+    // all. Settings then stays read-only rather than the whole site being shut.
   }
+
+  if (!key) key = await deriveKey(password, payload.kdf);
 
   MANIFEST = await decryptWith(key, payload);      // throws if the key is wrong
   KEY = key;
@@ -569,6 +583,8 @@ function settingControl(row) {
   return node;
 }
 
+function editableNow() { return Boolean(SETTINGS_URL && SESSION_TOKEN); }
+
 function renderSettings() {
   const host = $('settings-body');
   host.innerHTML = '';
@@ -580,7 +596,10 @@ function renderSettings() {
     return;
   }
 
-  const editable = Boolean(SETTINGS_URL);
+  // A URL alone is not enough — without a token the service will refuse
+  // every write, and offering controls that cannot save is worse than
+  // showing the values plainly.
+  const editable = Boolean(SETTINGS_URL && SESSION_TOKEN);
   const groups = new Map();
   SETTINGS_ROWS.forEach((row) => {
     const group = row.Group || 'Other';
@@ -792,7 +811,7 @@ async function loadSettings() {
   link.hidden = !MANIFEST.spreadsheet_id;
 
   try {
-    if (SETTINGS_URL) {
+    if (SETTINGS_URL && SESSION_TOKEN) {
       // Live from the sheet, so the panel shows the truth rather than whatever
       // the last publish froze.
       $('settings-body').innerHTML = '<p class="muted">reading the sheet…</p>';
@@ -802,10 +821,11 @@ async function loadSettings() {
       SETTINGS_ROWS = data.cache.Settings.rows;
     }
     renderSettings();
-    if (!SETTINGS_URL) {
+    if (!editableNow()) {
       banner($('settings-error'), 'warn',
-        'Read-only: no Settings service is configured, so this shows the last published ' +
-        'snapshot. Edit in Google Sheets, or set SETTINGS_WEB_APP_URL to enable saving here.');
+        'Read-only: the Settings service is not available for this session, so this ' +
+        'shows the last published snapshot. Edit in Google Sheets, or check the service ' +
+        'is deployed with DASHBOARD_PASSWORD and DASHBOARD_DATA_KEY set.');
     }
   } catch (err) {
     // A live read failing must not leave an empty panel — fall back.
