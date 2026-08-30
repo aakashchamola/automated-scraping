@@ -19,6 +19,11 @@ on:
     - cron: '0 6 * * 1'        # Mondays 06:00 UTC
   workflow_dispatch:
     inputs:
+      project:
+        description: Project id from the control sheet (blank = the first active one)
+        type: string
+        required: false
+        default: ''
       steps:
         description: Which part of the pipeline to run
         type: choice
@@ -35,8 +40,10 @@ on:
           - pagination-only       # read-only "See More Jobs" depth report
           - cleanup-rows          # clear stale company rows (dry-run unless confirmed)
 
-concurrency:                    # every step writes the same sheet tabs
-  group: pipeline
+concurrency:
+  # Every step writes the same tabs, so runs against ONE project must queue —
+  # but two projects are two different spreadsheets and need not wait.
+  group: pipeline-${{ inputs.project || 'default' }}
   cancel-in-progress: false
 
 permissions:
@@ -48,6 +55,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # Read by every tool through projects_registry; blank = first active.
+      PROJECT_ID: ${{ inputs.project }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +81,36 @@ jobs:
           printf '%s' "$KEY" > secrets/google-service-account.json
           python -c "import json;json.load(open('secrets/google-service-account.json'))" \
             || { echo "::error::the secret is not valid JSON"; exit 1; }
+
+      - name: Which project this run works on
+        # Every tool reads PROJECT_ID from the environment (see
+        # projects_registry.add_project_argument), so nothing below needs a
+        # flag. Blank means the first active project in the control sheet.
+        run: |
+          python -u - <<'PY'
+          import os
+          import projects_registry
+          from config_loader import load_config
+
+          config = load_config("config.yaml")
+          registry = projects_registry.registry_from_config(config)
+          active = registry.list()
+          if not active:
+              raise SystemExit("::error::the control sheet lists no active projects")
+
+          wanted = (os.environ.get("PROJECT_ID") or "").strip()
+          if wanted:
+              project = registry.get(wanted)
+              if not project:
+                  known = ", ".join(p["id"] for p in active)
+                  raise SystemExit(f"::error::no project {wanted!r}. Known: {known}")
+          else:
+              project = active[0]
+              print(f"::notice::no project given; using '{project['id']}'")
+
+          print("project     :", project["id"], "-", project.get("name", ""))
+          print("spreadsheet :", project["spreadsheet_id"])
+          PY
 
       - name: Apply the Settings worksheet
         # The published dashboard cannot write settings, so the Settings tab in
@@ -153,50 +193,45 @@ jobs:
 
       - run: pip install -q -r requirements.txt
 
-      - name: Check the publishing secrets are set
+      - name: Restore the service-account key
         env:
           KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-          PW: ${{ secrets.DASHBOARD_PASSWORD }}
-          DATA_KEY: ${{ secrets.DASHBOARD_DATA_KEY }}
         run: |
-          missing=0
-          [ -n "$KEY" ] || { echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; missing=1; }
-
-          # The data key encrypts the published files; the password is only
-          # what people type. Keeping them separate is what lets the password
-          # be changed from the dashboard — changing the key instead would
-          # strand every file already published.
-          if [ -n "$DATA_KEY" ]; then
-            echo "encrypting with DASHBOARD_DATA_KEY (password is changeable from the dashboard)"
-          elif [ -n "$PW" ]; then
-            echo "::warning::DASHBOARD_DATA_KEY is not set — falling back to DASHBOARD_PASSWORD as the key. The password then cannot be changed from the dashboard, because changing it would leave the published files undecryptable."
-          else
-            echo "::error::set DASHBOARD_DATA_KEY (preferred) or DASHBOARD_PASSWORD"; missing=1
+          if [ -z "$KEY" ]; then
+            echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; exit 1
           fi
-          [ $missing -eq 0 ] || exit 1
           mkdir -p secrets && printf '%s' "$KEY" > secrets/google-service-account.json
 
-      - name: Export the sheet tabs
-        run: python -u export_snapshot.py --config config.yaml --out site/data
-
-      - name: Encrypt them
-        env:
-          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_DATA_KEY || secrets.DASHBOARD_PASSWORD }}
-        run: python -u encrypt_snapshot.py --in site/data --out site/data
+      - name: Export and encrypt every project
+        # Each project is encrypted under its own data key, taken from the
+        # control sheet. There are no per-project repository secrets, which is
+        # what lets a new project be published without touching this file.
+        run: python -u publish_projects.py --config config.yaml --out site/data
 
       - name: Refuse to publish cleartext
         # Cheap insurance: if the encrypt step ever changes shape, this stops a
-        # readable copy of the sheet reaching a public URL.
+        # readable copy of a sheet reaching a public URL.
         run: |
-          if ls site/data/*.json 2>/dev/null | grep -v '\.enc\.json$' | grep -q .; then
-            echo "::error::cleartext JSON found in site/data — refusing to publish"
-            ls -la site/data
+          if find site/data -name '*.json' ! -name '*.enc.json' | grep -q .; then
+            echo "::error::cleartext JSON found under site/data — refusing to publish"
+            find site/data -name '*.json' ! -name '*.enc.json'
             exit 1
           fi
-          echo "only ciphertext present:"; ls site/data
+          echo "only ciphertext present:"; find site/data -type f | sort
 
       - name: Stamp the build
         run: |
+          # defaultProject is the fallback the page uses when the Settings
+          # service is unreachable and so cannot say which project a password
+          # belongs to. It is the first active project, and no others are named
+          # — the published page must not disclose what projects exist.
+          DEFAULT_PROJECT=$(python -u - <<'PY'
+          import projects_registry
+          from config_loader import load_config
+          active = projects_registry.registry_from_config(load_config("config.yaml")).list()
+          print(active[0]["id"] if active else "")
+          PY
+          )
           cat > site/config.js <<JS
           window.DASHBOARD_CONFIG = {
             repo: "${{ github.repository }}",
@@ -204,10 +239,12 @@ jobs:
             branch: "${{ github.ref_name }}",
             builtAt: "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             settingsWebApp: "${{ secrets.SETTINGS_WEB_APP_URL }}",
+            defaultProject: "$DEFAULT_PROJECT",
           };
           JS
+          echo "default project: $DEFAULT_PROJECT"
           if [ -z "${{ secrets.SETTINGS_WEB_APP_URL }}" ]; then
-            echo "::notice::SETTINGS_WEB_APP_URL is not set — the Settings panel will be read-only."
+            echo "::notice::SETTINGS_WEB_APP_URL is not set — Settings and Keywords will be read-only and projects cannot be created."
           fi
 
       - name: Remove the key before anything is uploaded

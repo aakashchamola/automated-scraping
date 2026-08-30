@@ -23,9 +23,11 @@ const banner = (host, kind, msg) => {
 const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 const REMEMBER_DAYS = 10;
-const EXPIRY_KEY = 'dash-key-expires';
 const DB_NAME = 'dashboard-auth';
 const STORE = 'keys';
+/* One record holding {projectId: {name, key, token, expires}} — see
+   "Staying signed in, per project" below. */
+const SESSIONS_KEY = 'sessions';
 
 async function deriveKey(password, kdf) {
   const material = await crypto.subtle.importKey(
@@ -34,17 +36,22 @@ async function deriveKey(password, kdf) {
     { name: 'PBKDF2', salt: b64(kdf.salt), iterations: kdf.iterations, hash: kdf.hash },
     material,
     { name: 'AES-GCM', length: 256 },
-    /* extractable */ false,          // see rememberKey()
+    /* extractable */ false,          // see rememberSession()
     ['decrypt']);
 }
 
-/* ── Staying signed in ────────────────────────────────────────────────────
+/* ── Staying signed in, per project ───────────────────────────────────────
    The derived CryptoKey is stored, never the password. Marking it
    non-extractable means the browser will decrypt with it but will not hand its
    bytes back to any script, so a cached session cannot give up a password the
    viewer may well have reused somewhere else. IndexedDB is used because it is
    the only browser store that can hold a live CryptoKey; localStorage would
-   force us to keep the password as text. */
+   force us to keep the password as text.
+
+   Sessions are kept one per project, which is what makes switching instant:
+   unlocking a second project adds to this rather than replacing it, and moving
+   between projects you have already unlocked never asks for a password again.
+   Each has its own expiry, so they lapse independently. */
 
 function idb() {
   return new Promise((resolve, reject) => {
@@ -78,43 +85,65 @@ async function idbGet(key) {
   return value;
 }
 
-async function rememberKey(key, token) {
+/* Every remembered session, expired ones dropped. A CryptoKey survives being
+   nested inside a plain object because IndexedDB stores by structured clone,
+   which handles keys — so one record can hold them all. */
+async function loadSessions() {
   try {
-    await idbPut('data-key', key);
-    await idbPut('session-token', token || null);
-    localStorage.setItem(EXPIRY_KEY, String(Date.now() + REMEMBER_DAYS * 864e5));
+    const all = (await idbGet(SESSIONS_KEY)) || {};
+    const now = Date.now();
+    let changed = false;
+    for (const id of Object.keys(all)) {
+      if (!all[id] || !all[id].key || (all[id].expires || 0) < now) {
+        delete all[id];
+        changed = true;
+      }
+    }
+    if (changed) await idbPut(SESSIONS_KEY, all);
+    return all;
   } catch (e) {
     // Private browsing and blocked site data both land here. Staying signed in
     // is a convenience; losing it must not stop the page working.
+    console.warn('could not read remembered sessions:', e.name);
+    return {};
+  }
+}
+
+async function rememberSession(project, name, key, token) {
+  try {
+    const all = await loadSessions();
+    all[project] = { name, key, token: token || null,
+                     expires: Date.now() + REMEMBER_DAYS * 864e5,
+                     usedAt: Date.now() };
+    await idbPut(SESSIONS_KEY, all);
+  } catch (e) {
     console.warn('could not remember this session:', e.name);
   }
 }
 
-async function recallKey() {
+/* Bump a session to the front without re-deriving anything, so reopening the
+   page returns to the project you were last actually looking at. */
+async function touchSession(project) {
   try {
-    const expires = Number(localStorage.getItem(EXPIRY_KEY) || 0);
-    if (!expires || Date.now() > expires) {
-      await forgetKey();
-      return null;
-    }
-    SESSION_TOKEN = (await idbGet('session-token')) || null;
-    return (await idbGet('data-key')) || null;
-  } catch {
-    return null;
-  }
+    const all = await loadSessions();
+    if (all[project]) { all[project].usedAt = Date.now(); await idbPut(SESSIONS_KEY, all); }
+  } catch { /* not worth failing a page load over */ }
 }
 
-async function forgetKey() {
+async function forgetSession(project) {
   try {
-    localStorage.removeItem(EXPIRY_KEY);
-    await idbPut('data-key', null);
-    await idbPut('session-token', null);
-    SESSION_TOKEN = null;
+    const all = await loadSessions();
+    delete all[project];
+    await idbPut(SESSIONS_KEY, all);
   } catch { /* nothing to clean up */ }
 }
 
+async function forgetAllSessions() {
+  try { await idbPut(SESSIONS_KEY, {}); } catch { /* nothing to clean up */ }
+}
+
 function remainingDays() {
-  const expires = Number(localStorage.getItem(EXPIRY_KEY) || 0);
+  const expires = (SESSION && SESSION.expires) || 0;
   return expires ? Math.max(0, Math.ceil((expires - Date.now()) / 864e5)) : 0;
 }
 
@@ -126,40 +155,62 @@ async function decryptWith(key, payload) {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
-async function fetchPayload(name) {
-  const res = await fetch(`data/${name}.enc.json`, { cache: 'no-cache' });
+/* Each project's files live in their own directory, encrypted under that
+   project's own key, so a session for one decrypts nothing belonging to
+   another. There is deliberately no index of the directories: the page is told
+   which one it may read by the service that checked the password. */
+async function fetchPayloadFor(project, name) {
+  const res = await fetch(`data/${project}/${name}.enc.json`, { cache: 'no-cache' });
   if (!res.ok) throw new Error(`could not load ${name} (HTTP ${res.status})`);
   return res.json();
+}
+
+async function fetchPayload(name) {
+  if (!PROJECT) throw new Error('no project is open');
+  return fetchPayloadFor(PROJECT.id, name);
 }
 
 async function fetchEncrypted(name, key) {
   return decryptWith(key, await fetchPayload(name));
 }
 
-/* ── Login gate ─────────────────────────────────────────────────────────── */
+/* ── Signing in, and which project you are in ─────────────────────────────
+   The password selects the project: the Settings service is asked which one it
+   unlocks, so the landing page never has to list them and opening the URL
+   discloses no project names. */
 
 let KEY = null;          // the derived CryptoKey; the password is never kept
 let MANIFEST = null;
+let PROJECT = null;      // { id, name }
+let SESSION = null;      // the remembered record for PROJECT, when there is one
 /* Issued by the Settings service after a correct password. The page remembers
    this instead of the password, so staying signed in never means keeping what
    someone typed — and changing the password revokes it server-side. */
 let SESSION_TOKEN = null;
 
+/* A refusal from the service is a wrong password, not a broken page — the
+   login form should say so plainly rather than showing a decryption error. */
+class AuthError extends Error {
+  constructor(message) { super(message); this.name = 'AuthError'; }
+}
+
 /* Sign in.
 
-   With a Settings service configured, the password is checked there and the
-   service hands back two things: the key the published files were encrypted
-   with, and a session token. The password is never the encryption key, which
-   is exactly what makes it changeable from this page — changing an encryption
-   key would strand every already-published file.
+   The service checks the password and hands back three things: which project
+   it belongs to, the key that project's published files were encrypted with,
+   and a session token. The password is never the encryption key, which is
+   exactly what makes it changeable from this page — changing an encryption key
+   would strand every already-published file.
 
-   Without a service, the password IS the key (the original arrangement), and
-   the page still works standalone — it just cannot save settings or change
-   the password. */
+   Without a reachable service the project cannot be identified, so the page
+   falls back to the one stamped in at publish time and tries the password as
+   the key. That is how this site worked before it had projects, and it keeps a
+   single-project setup usable while the service is down; a project whose key
+   is not its password simply will not open, which is correct. */
 async function unlock(password, remember) {
-  const payload = await fetchPayload('index');
   let key = null;
-  SESSION_TOKEN = null;
+  let project = null;
+  let token = null;
 
   if (SETTINGS_URL) {
     let auth = null;
@@ -170,52 +221,186 @@ async function unlock(password, remember) {
       auth = { ok: false, error: err.message, unreachable: true };
     }
     if (auth.ok) {
+      project = { id: auth.project, name: auth.name || auth.project };
+      token = auth.token;
+      const payload = await fetchPayloadFor(project.id, 'index');
       key = await deriveKey(auth.dataKey, payload.kdf);
-      SESSION_TOKEN = auth.token;
-    } else if (auth.error && /wrong password|no password sent/i.test(auth.error)) {
+    } else if (auth.error && /no project matched|no password sent/i.test(auth.error)) {
       // The service is working and says no. Believe it.
-      throw new AuthError('Wrong password.');
+      throw new AuthError('No project matched that password.');
     }
     // Anything else — service unreachable, properties not configured yet, a
-    // deployment mid-change — must not brick the page. Fall through and try
-    // the password as the key, which is how the site works with no service at
-    // all. Settings then stays read-only rather than the whole site being shut.
+    // deployment mid-change — must not brick the page. Fall through.
   }
 
-  if (!key) key = await deriveKey(password, payload.kdf);
+  if (!key) {
+    const fallbackId = (CFG.defaultProject || '').trim();
+    if (!fallbackId) {
+      throw new Error('the Settings service is unreachable, so the project ' +
+                      'cannot be identified');
+    }
+    project = { id: fallbackId, name: fallbackId };
+    const payload = await fetchPayloadFor(fallbackId, 'index');
+    key = await deriveKey(password, payload.kdf);
+  }
 
-  MANIFEST = await decryptWith(key, payload);      // throws if the key is wrong
+  await enter(project, key, token, remember);
+}
+
+/* Everything that has to be true once a project is open, in one place, so
+   signing in and switching cannot drift apart.
+
+   The order matters. The manifest is decrypted first, because that is what
+   proves the key is right and nothing should be stored or shown until it does.
+   The session is remembered before the switcher is drawn, or the project just
+   opened would be missing from its own menu. And the app is revealed last, so
+   it is never briefly visible showing the previous project's name. */
+async function enter(project, key, token, remember = false) {
+  // Named explicitly rather than through fetchPayload(), which reads PROJECT —
+  // and PROJECT must not be set until the key has proved itself.
+  const manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
+
+  PROJECT = project;
   KEY = key;
-  if (remember) await rememberKey(key, SESSION_TOKEN);
+  SESSION_TOKEN = token || null;
+  MANIFEST = manifest;
+  data.cache = {};                 // the previous project's tabs are not this one's
+  SETTINGS_ROWS = null;
+  KEYWORDS = null;
+  KEYWORD_DRAFT = null;
+
+  if (remember) await rememberSession(project.id, project.name, key, token);
+  SESSION = (await loadSessions())[project.id] || null;
+
+  await renderSwitcher();
   $('gate').hidden = true;
   $('app').hidden = false;
   await boot();
 }
 
-/* A refusal from the service is a wrong password, not a broken page — the
-   login form should say so plainly rather than showing a decryption error. */
-class AuthError extends Error {
-  constructor(message) { super(message); this.name = 'AuthError'; }
+/* Resume the project last looked at. A key that no longer decrypts means the
+   data was republished under a new key, so that session is dropped and the
+   viewer is asked again rather than shown a broken page. */
+async function resume() {
+  const all = await loadSessions();
+  const ordered = Object.entries(all)
+    .sort((a, b) => (b[1].usedAt || 0) - (a[1].usedAt || 0));
+  for (const [id, rec] of ordered) {
+    try {
+      SESSION = rec;
+      await enter({ id, name: rec.name || id }, rec.key, rec.token);
+      await touchSession(id);
+      return true;
+    } catch {
+      await forgetSession(id);      // stale; try the next one
+    }
+  }
+  SESSION = null;
+  return false;
 }
 
-/* Resume a remembered session. A key that no longer decrypts means the
-   password was rotated and the data republished, so the stale key is discarded
-   and the viewer is asked again rather than shown a broken page. */
-async function resume() {
-  const key = await recallKey();
-  if (!key) return false;
+async function switchTo(projectId) {
+  const rec = (await loadSessions())[projectId];
+  if (!rec) return openGate({ extra: true });
+  closeMenu();
   try {
-    MANIFEST = await fetchEncrypted('index', key);
-    KEY = key;
-    $('gate').hidden = true;
-    $('app').hidden = false;
-    await boot();
-    return true;
-  } catch {
-    await forgetKey();
-    return false;
+    SESSION = rec;
+    await enter({ id: projectId, name: rec.name || projectId }, rec.key, rec.token);
+    await touchSession(projectId);
+  } catch (err) {
+    // Its data was republished under a different key, or removed.
+    await forgetSession(projectId);
+    openGate({ extra: true, message:
+      `${rec.name || projectId} needs its password again.` });
   }
 }
+
+/* ── The project switcher ─────────────────────────────────────────────────
+   Only projects already unlocked on this device are listed. There is nothing
+   to enumerate: the page has never been told what else exists. */
+
+function closeMenu() {
+  $('project-menu').hidden = true;
+  $('project-btn').setAttribute('aria-expanded', 'false');
+}
+
+async function renderSwitcher() {
+  $('project-name').textContent = (PROJECT && PROJECT.name) || 'Project';
+  const menu = $('project-menu');
+  menu.innerHTML = '';
+  const all = await loadSessions();
+
+  Object.entries(all)
+    .sort((a, b) => (a[1].name || a[0]).localeCompare(b[1].name || b[0]))
+    .forEach(([id, rec]) => {
+      const item = el('button', 'menu-item');
+      item.type = 'button';
+      const current = PROJECT && id === PROJECT.id;
+      item.appendChild(el('span', 'tick', current ? '✓' : ''));
+      item.appendChild(el('span', '', rec.name || id));
+      if (current) item.classList.add('current');
+      item.addEventListener('click', () => { if (!current) switchTo(id); else closeMenu(); });
+      menu.appendChild(item);
+    });
+
+  if (Object.keys(all).length) menu.appendChild(el('div', 'menu-sep'));
+
+  const add = el('button', 'menu-item', '＋  Unlock another project');
+  add.type = 'button';
+  add.addEventListener('click', () => { closeMenu(); openGate({ extra: true }); });
+  menu.appendChild(add);
+
+  if (SETTINGS_URL) {
+    const make = el('button', 'menu-item', '✚  New project…');
+    make.type = 'button';
+    make.addEventListener('click', () => { closeMenu(); openNewProject(); });
+    menu.appendChild(make);
+  }
+
+  const out = el('button', 'menu-item danger', 'Sign out of this project');
+  out.type = 'button';
+  out.addEventListener('click', async () => {
+    if (PROJECT) await forgetSession(PROJECT.id);
+    location.reload();
+  });
+  menu.appendChild(out);
+}
+
+$('project-btn').addEventListener('click', () => {
+  const menu = $('project-menu');
+  const showing = menu.hidden;
+  menu.hidden = !showing;
+  $('project-btn').setAttribute('aria-expanded', String(showing));
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.switcher')) closeMenu();
+});
+
+/* ── The gate ─────────────────────────────────────────────────────────────
+   Shown to sign in for the first time, and again to add a second project —
+   in which case it can be cancelled back to the project already open. */
+
+let GATE_IS_EXTRA = false;
+
+function openGate({ extra = false, message = '' } = {}) {
+  GATE_IS_EXTRA = extra;
+  $('gate-title').textContent = extra ? 'Unlock another project' : 'Job Scraping Automation';
+  $('gate-sub').textContent = extra
+    ? 'Enter that project\'s password. The one you are in now stays unlocked.'
+    : 'Enter your project password. It decrypts the data in your browser — nothing is sent anywhere.';
+  $('gate-err').textContent = message;
+  $('gate-cancel').hidden = !extra;
+  $('gate-pw').value = '';
+  $('app').hidden = extra ? false : true;
+  $('gate').hidden = false;
+  $('gate-pw').focus();
+}
+
+$('gate-cancel').addEventListener('click', () => {
+  GATE_IS_EXTRA = false;
+  $('gate').hidden = true;
+  $('app').hidden = false;
+});
 
 $('gate-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -228,7 +413,7 @@ $('gate-form').addEventListener('submit', async (e) => {
     await unlock($('gate-pw').value, $('gate-remember').checked);
   } catch (ex) {
     err.textContent = (ex.name === 'OperationError' || ex.name === 'AuthError')
-      ? (ex.name === 'AuthError' ? ex.message : 'Wrong password.')
+      ? (ex.name === 'AuthError' ? ex.message : 'No project matched that password.')
       : `Could not unlock: ${ex.message}`;
     $('gate-pw').select();
   } finally {
@@ -238,9 +423,98 @@ $('gate-form').addEventListener('submit', async (e) => {
 });
 
 $('btn-lock').addEventListener('click', async () => {
-  await forgetKey();
+  await forgetAllSessions();
   location.reload();
 });
+
+/* ── Creating a project ───────────────────────────────────────────────────
+   The service does the whole job: it creates the spreadsheet in the owner's
+   Drive, gives it the tabs the automation expects, shares it with the service
+   account, and registers it. A service account cannot do this itself — one on
+   a consumer account has no Drive storage quota, so it cannot own a file at
+   all — which is why this is a call to the Apps Script and not to Python.
+
+   As with every other write here, the POST's own answer is unreadable (see the
+   Settings section), so success is proved by signing in to the new project. */
+
+function openNewProject() {
+  const dlg = $('new-project');
+  ['np-name', 'np-pw', 'np-sheet', 'np-admin'].forEach((id) => { $(id).value = ''; });
+  $('np-err').textContent = '';
+  $('np-done').hidden = true;
+  $('np-go').disabled = false;
+  $('np-go').textContent = 'Create project';
+  // Only ask for an admin password when the service says it wants one.
+  jsonp(`${SETTINGS_URL}?ping=1`)
+    .then((info) => { $('np-admin-wrap').hidden = !info.adminPasswordConfigured; })
+    .catch(() => { $('np-admin-wrap').hidden = true; });
+  dlg.showModal();
+}
+
+async function createProject() {
+  const name = $('np-name').value.trim();
+  const password = $('np-pw').value;
+  const spreadsheetId = $('np-sheet').value.trim();
+  const adminPassword = $('np-admin').value;
+  const err = $('np-err');
+  err.textContent = '';
+
+  if (!name) { err.textContent = 'Give the project a name.'; return; }
+  if (password.length < 8) {
+    err.textContent = 'The password must be at least 8 characters.'; return;
+  }
+
+  const go = $('np-go');
+  go.disabled = true;
+  go.textContent = 'Creating…';
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'createProject', token: SESSION_TOKEN,
+        name, password, spreadsheetId, adminPassword,
+      }),
+    });
+
+    // Creating a spreadsheet and sharing it takes a few seconds, so the
+    // confirmation is retried rather than asked once and given up on.
+    let auth = null;
+    for (let attempt = 0; attempt < 10 && !(auth && auth.ok); attempt++) {
+      await new Promise((r) => setTimeout(r, attempt ? 2000 : 1500));
+      try {
+        auth = await jsonp(
+          `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+      } catch { /* keep waiting */ }
+    }
+
+    if (!auth || !auth.ok) {
+      err.textContent = 'The project was not created. The most likely reasons are ' +
+        'a password another project already uses, or an admin password being required.';
+      go.disabled = false;
+      go.textContent = 'Create project';
+      return;
+    }
+
+    // Deliberately not remembered as a session yet: there is nothing published
+    // to derive a key from until the first run, so a stored session would be
+    // an entry that cannot open anything.
+    $('np-done').hidden = false;
+    $('np-done').textContent =
+      `Created "${auth.name || name}" — the spreadsheet is in your Drive and the ` +
+      'service account can already reach it. Run the pipeline for this project, ' +
+      'then unlock it here with its password.';
+    go.textContent = 'Created';
+  } catch (ex) {
+    err.textContent = `Could not create the project: ${ex.message}`;
+    go.disabled = false;
+    go.textContent = 'Create project';
+  }
+}
+
+$('np-go').addEventListener('click', createProject);
+$('np-cancel').addEventListener('click', () => $('new-project').close());
 
 /* ── Data ───────────────────────────────────────────────────────────────── */
 
@@ -666,7 +940,9 @@ async function changePassword() {
       `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(next)}`);
     if (check.ok) {
       SESSION_TOKEN = check.token;
-      if (remainingDays()) await rememberKey(KEY, SESSION_TOKEN);
+      if (remainingDays() && PROJECT) {
+        await rememberSession(PROJECT.id, PROJECT.name, KEY, SESSION_TOKEN);
+      }
       ['pw-current', 'pw-new', 'pw-repeat'].forEach((id) => { $(id).value = ''; });
       status.textContent = '';
       banner($('settings-error'), 'ok',
@@ -918,21 +1194,6 @@ document.querySelectorAll('nav button').forEach((btn) => {
 
 async function loadSettings() {
   banner($('settings-error'), '', '');
-  try {
-    if (!data.cache.Settings) {
-      data.cache.Settings = await fetchEncrypted('Settings', KEY);
-    }
-    renderSettings();
-    const link = $('settings-edit');
-    link.href = `https://docs.google.com/spreadsheets/d/${MANIFEST.spreadsheet_id || ''}`;
-    link.hidden = !MANIFEST.spreadsheet_id;
-  } catch (err) {
-    banner($('settings-error'), 'err', `Could not load Settings: ${err.message}`);
-  }
-}
-
-async function loadSettings() {
-  banner($('settings-error'), '', '');
   const link = $('settings-edit');
   link.href = `https://docs.google.com/spreadsheets/d/${MANIFEST.spreadsheet_id || ''}`;
   link.hidden = !MANIFEST.spreadsheet_id;
@@ -952,7 +1213,7 @@ async function loadSettings() {
       banner($('settings-error'), 'warn',
         'Read-only: the Settings service is not available for this session, so this ' +
         'shows the last published snapshot. Edit in Google Sheets, or check the service ' +
-        'is deployed with DASHBOARD_PASSWORD and DASHBOARD_DATA_KEY set.');
+        'is deployed with CONTROL_SHEET_ID set in its Script Properties.');
     }
   } catch (err) {
     // A live read failing must not leave an empty panel — fall back.

@@ -116,6 +116,14 @@ function _serviceAccount() {
   return _props().getProperty('SERVICE_ACCOUNT') || '';
 }
 
+function _effectiveUser() {
+  try {
+    return Session.getEffectiveUser().getEmail();
+  } catch (err) {
+    return '';
+  }
+}
+
 function _adminPassword() {
   return _props().getProperty('ADMIN_PASSWORD') || '';
 }
@@ -623,7 +631,9 @@ function doGet(e) {
         activeProjects: count,
         serviceAccountConfigured: Boolean(_serviceAccount()),
         adminPasswordConfigured: Boolean(_adminPassword()),
-        runsAs: Session.getEffectiveUser().getEmail(),
+        // Diagnostic only, and it needs the userinfo.email scope, which is not
+        // granted by default — so it must never be allowed to fail the ping.
+        runsAs: _effectiveUser(),
         error: controlError || undefined
       };
 

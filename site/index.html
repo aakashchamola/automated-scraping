@@ -11,8 +11,8 @@
 <div class="gate" id="gate">
   <form id="gate-form" autocomplete="on">
     <div class="lock">🔒</div>
-    <h2>Job Scraping Automation</h2>
-    <p>Enter the access password. It decrypts the data in your browser — nothing is sent anywhere.</p>
+    <h2 id="gate-title">Job Scraping Automation</h2>
+    <p id="gate-sub">Enter your project password. It decrypts the data in your browser — nothing is sent anywhere.</p>
     <input type="password" id="gate-pw" placeholder="Password" autocomplete="current-password" required autofocus>
     <label class="switch" style="font-size:13.5px">
       <input type="checkbox" id="gate-remember" checked>
@@ -20,12 +20,19 @@
     </label>
     <div class="err" id="gate-err"></div>
     <button class="btn primary" type="submit" id="gate-go">Unlock</button>
+    <button class="btn" type="button" id="gate-cancel" hidden>Cancel</button>
   </form>
 </div>
 
 <div id="app" hidden>
   <header>
     <h1>Job Scraping Automation</h1>
+    <div class="switcher">
+      <button id="project-btn" class="btn sm" aria-haspopup="true" aria-expanded="false">
+        <span id="project-name">…</span> <span class="caret">▾</span>
+      </button>
+      <div id="project-menu" class="menu" hidden></div>
+    </div>
     <nav role="tablist">
       <button role="tab" aria-selected="true" data-panel="panel-data">Data</button>
       <button role="tab" aria-selected="false" data-panel="panel-runs">Runs</button>
@@ -178,7 +185,45 @@
   </main>
 </div>
 
+<dialog id="new-project">
+  <form method="dialog" id="new-project-form">
+    <h2>New project</h2>
+    <p class="muted">A spreadsheet is created in your Drive, given the tabs the
+      automation expects, and shared with the service account — nothing to set up by hand.</p>
+
+    <label for="np-name">Project name</label>
+    <input type="text" id="np-name" placeholder="Biotech Jobs" required>
+
+    <label for="np-pw">Password for this project</label>
+    <input type="password" id="np-pw" placeholder="at least 8 characters"
+           autocomplete="new-password" minlength="8" required>
+    <p class="hint">This password is how anyone reaches this project, and it must
+      differ from every other project's.</p>
+
+    <details>
+      <summary>Use a spreadsheet I already have</summary>
+      <label for="np-sheet">Spreadsheet ID</label>
+      <input type="text" id="np-sheet" placeholder="leave blank to create a new one">
+      <p class="hint">The long string in the sheet's URL, between /d/ and /edit.
+        Any missing tabs are added; existing ones are left alone.</p>
+    </details>
+
+    <div id="np-admin-wrap" hidden>
+      <label for="np-admin">Admin password</label>
+      <input type="password" id="np-admin" autocomplete="off">
+    </div>
+
+    <div class="err" id="np-err"></div>
+    <div id="np-done" class="ok" hidden></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="np-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="np-go">Create project</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="config.js"></script>
 <script src="app.js"></script>
+
 </body>
 </html>

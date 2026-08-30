@@ -80,7 +80,21 @@ function buildSandbox(world) {
     Utilities,
     console,
     Logger: { log() {} },
-    Session: { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) },
+    Session: {
+      getEffectiveUser: () => ({
+        getEmail() {
+          // Apps Script throws here unless the userinfo.email scope was
+          // granted, which it is not by default. A live deployment failed on
+          // exactly this, so the shim reproduces it.
+          if (world.denyUserinfo) {
+            throw new Error('You do not have permission to call ' +
+              'Session.getEffectiveUser. Required permissions: ' +
+              'https://www.googleapis.com/auth/userinfo.email');
+          }
+          return 'owner@example.com';
+        },
+      }),
+    },
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: k => (k in world.props ? world.props[k] : null),
@@ -190,6 +204,13 @@ console.log('\nSettings.gs\n');
   check('never names them', !JSON.stringify(after).includes('Alpha'));
   check('confirms the control sheet is readable', after.controlSheetReadable === true);
   check('confirms the service account is set', after.serviceAccountConfigured === true);
+
+  // Diagnostics must never be able to fail the whole ping.
+  world.denyUserinfo = true;
+  const denied = get(s, { ping: '1' });
+  check('a refused userinfo scope does not break the ping',
+        denied.ok === true && denied.activeProjects === 2, JSON.stringify(denied));
+  check('and the field is simply blank', denied.runsAs === '');
 }
 
 {

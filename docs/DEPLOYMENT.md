@@ -6,32 +6,36 @@ GitHub Actions.
 
 ```
   GitHub Actions  ──►  runs the pipeline        (holds the GCP key)
-        │              exports the sheet tabs
-        │              encrypts them with your password
+        │              exports each project's tabs
+        │              encrypts each under that project's own key
         ▼
   GitHub Pages    ──►  static page + ciphertext (holds no secrets)
         │
         ▼
-  Browser         ──►  password decrypts the data locally
+  Browser         ──►  a project's password decrypts only that project
 ```
 
-## Setup — two secrets and one toggle
+## Setup — one secret and one toggle
 
 ```bash
-# 1. the Google key the pipeline needs
+# the Google key the pipeline needs
 gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json
 
-# 2. the password people will type to open the dashboard (min 8 characters)
-gh secret set DASHBOARD_PASSWORD
+# the Apps Script Web App URL, which is where passwords are checked
+gh secret set SETTINGS_WEB_APP_URL
 ```
 
-**3.** Settings → Pages → **Source: GitHub Actions**.
+**Then:** Settings → Pages → **Source: GitHub Actions**.
 
-Then run *Scheduled scrape* once from the Actions tab. When it finishes, the
-page is live at `https://<owner>.github.io/<repo>/`.
+There is deliberately no password secret. Passwords are **per project** and live
+in the control spreadsheet, so adding a project needs no repository change at
+all — see [PROJECTS.md](PROJECTS.md).
 
-Share the URL and the password. That is the whole handover — no install, no
-Python, no keys on anyone's laptop.
+Run *Scheduled scrape* once from the Actions tab. When it finishes, the page is
+live at `https://<owner>.github.io/<repo>/`.
+
+Share the URL and that project's password. That is the whole handover — no
+install, no Python, no keys on anyone's laptop.
 
 ## Why the password is real security here
 
@@ -52,11 +56,12 @@ What this does and does not give you:
 
 - **Does:** anyone without the password sees nothing, even reading the raw
   files. The GCP key is never on Pages, never in the repo, never in a browser.
-- **Does not:** it is one shared password, so it cannot tell users apart or be
-  revoked per person. Rotate it by updating the `DASHBOARD_PASSWORD` secret and
-  re-running the workflow. Anyone who has both the password and an old copy of
-  the files can still read that old copy — rotation protects future
-  publications, not past ones.
+- **Does not:** a project's password is shared by everyone who has it, so it
+  cannot tell users apart or be revoked per person — but it is scoped to one
+  project, so handing it over grants nothing about the others. Change it from
+  the dashboard, which revokes every session immediately. Anyone who has both
+  the password and an old copy of the files can still read that old copy —
+  a change protects future publications, not past ones.
 
 Two guards back this up: the publish job **refuses to deploy** if any cleartext
 JSON is left in `site/data`, and it deletes the service-account key from the
@@ -64,15 +69,18 @@ runner before the upload step.
 
 ## Editing settings from the published page
 
-The Settings tab of the spreadsheet is the source of truth. The published page
-edits it through one Apps Script Web App bound to that spreadsheet — set up
-once, never touched again.
+Each project's Settings tab is the source of truth. The published page edits it
+through one **standalone** Apps Script Web App — set up once, never touched
+again, however many projects you add.
+
+It must be standalone rather than bound to a spreadsheet: a bound script can
+only ever reach its own container, which makes more than one project impossible.
 
 ```bash
-# 1. Spreadsheet -> Extensions -> Apps Script, paste apps-script/Settings.gs
-# 2. Project Settings -> Script Properties -> DASHBOARD_PASSWORD = <the password>
+# 1. script.google.com -> New project, paste apps-script/Settings.gs
+# 2. Project Settings -> Script Properties -> CONTROL_SHEET_ID and SERVICE_ACCOUNT
 # 3. Deploy -> New deployment -> Web app  (Execute as: Me, Access: Anyone)
-# 4. Check it: open <exec-url>?ping=1  -> sheetFound and passwordConfigured true
+# 4. Check it: open <exec-url>?ping=1  -> controlSheetReadable true
 gh secret set SETTINGS_WEB_APP_URL     # 5. paste the /exec URL
 ```
 
