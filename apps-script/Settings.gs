@@ -55,6 +55,11 @@ var SHEET_NAME = 'Settings';
 var KEY_COLUMN = 'Setting';
 var VALUE_COLUMN = 'Value';
 
+// The Keywords tab drives every scrape. Editing it from the dashboard means
+// the search terms can change without opening the spreadsheet.
+var KEYWORDS_SHEET = 'Keywords';
+var KEYWORDS_COLUMN = 'Search Term';
+
 var TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000;   // matches "stay signed in"
 var TOKEN_PROPERTY = 'SESSION_TOKENS';
 var MIN_PASSWORD_LENGTH = 8;
@@ -201,6 +206,73 @@ function _applyUpdates(updates) {
   return { applied: applied, unknown: unknown, unchanged: unchanged };
 }
 
+/* ── Keywords ───────────────────────────────────────────────────────────────
+   A plain list rather than key/value, so it is read and written as a whole
+   column. Only that one column is touched: the tab carries per-platform
+   columns beside it that nothing here should disturb. */
+
+function _keywordSheet() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(KEYWORDS_SHEET);
+  if (!sheet) throw new Error("no '" + KEYWORDS_SHEET + "' tab in this spreadsheet");
+  return sheet;
+}
+
+function _readKeywords() {
+  var sheet = _keywordSheet();
+  var values = sheet.getDataRange().getValues();
+  if (!values.length) return { keywords: [] };
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var at = header.indexOf(KEYWORDS_COLUMN);
+  if (at < 0) {
+    throw new Error("'" + KEYWORDS_SHEET + "' has no '" + KEYWORDS_COLUMN + "' column");
+  }
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var term = String(values[r][at] || '').trim();
+    if (term) out.push(term);
+  }
+  return { keywords: out, column: KEYWORDS_COLUMN, sheet: KEYWORDS_SHEET };
+}
+
+/**
+ * Replace the whole Search Term column with *list*.
+ *
+ * Rewriting the column rather than diffing rows keeps add, edit, reorder and
+ * delete as one operation. Cells below the new list are blanked rather than
+ * the rows being deleted, so the neighbouring per-platform columns keep their
+ * alignment with whatever is left.
+ */
+function _writeKeywords(list) {
+  var clean = [];
+  (list || []).forEach(function (raw) {
+    var term = String(raw || '').trim();
+    // Duplicates would scrape the same search twice for no benefit.
+    if (term && clean.indexOf(term) === -1) clean.push(term);
+  });
+  if (!clean.length) throw new Error('refusing to leave the Keywords tab empty');
+
+  var sheet = _keywordSheet();
+  var values = sheet.getDataRange().getValues();
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var at = header.indexOf(KEYWORDS_COLUMN);
+  if (at < 0) {
+    throw new Error("'" + KEYWORDS_SHEET + "' has no '" + KEYWORDS_COLUMN + "' column");
+  }
+
+  var previous = values.length - 1;              // data rows currently present
+  var needed = Math.max(clean.length, previous);
+  var column = [];
+  for (var i = 0; i < needed; i++) {
+    column.push([i < clean.length ? clean[i] : '']);
+  }
+  if (needed > previous) {
+    var missing = needed - previous;
+    if (sheet.getMaxRows() < needed + 1) sheet.insertRowsAfter(sheet.getMaxRows(), missing);
+  }
+  sheet.getRange(2, at + 1, needed, 1).setValues(column);
+  return { count: clean.length, cleared: Math.max(0, previous - clean.length) };
+}
+
 /* ── Reads (JSONP — CORS never applies to a <script> tag) ───────────────── */
 
 function doGet(e) {
@@ -219,7 +291,9 @@ function doGet(e) {
           SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME)),
         passwordConfigured: Boolean(_password()),
         dataKeyConfigured: Boolean(_dataKey()),
-        version: 2
+        keywordsFound: Boolean(
+          SpreadsheetApp.getActiveSpreadsheet().getSheetByName(KEYWORDS_SHEET)),
+        version: 3
       };
     } else if (action === 'auth') {
       // Sign in: check the password, then hand over the data key and a token.
@@ -236,6 +310,9 @@ function doGet(e) {
     } else if (!_authorised(params)) {
       payload = { ok: false, error: _authError(params.password || ''),
                   signedOut: true };
+    } else if (action === 'keywords') {
+      payload = { ok: true, keywords: _readKeywords(),
+                  readAt: new Date().toISOString() };
     } else {
       payload = { ok: true, settings: _readAll(),
                   readAt: new Date().toISOString() };
@@ -284,7 +361,11 @@ function doPost(e) {
       var lock = LockService.getScriptLock();
       lock.waitLock(20000);
       try {
-        result = _applyUpdates(body.updates || {});
+        if (body.action === 'saveKeywords') {
+          result = _writeKeywords(body.keywords || []);
+        } else {
+          result = _applyUpdates(body.updates || {});
+        }
         result.ok = true;
       } finally {
         lock.releaseLock();

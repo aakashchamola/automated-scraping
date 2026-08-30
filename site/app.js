@@ -685,6 +685,132 @@ async function changePassword() {
   }
 }
 
+/* ── Keywords ─────────────────────────────────────────────────────────────
+   A plain list, so it is edited as one and saved as one: the service replaces
+   the whole Search Term column. That makes add, edit, reorder and delete a
+   single operation rather than a row-by-row diff that could half-apply. */
+
+let KEYWORDS = null;        // as the sheet has them
+let KEYWORD_DRAFT = null;   // as the page has them
+
+function keywordsDirty() {
+  return Boolean(KEYWORDS && KEYWORD_DRAFT) &&
+         JSON.stringify(KEYWORDS) !== JSON.stringify(KEYWORD_DRAFT);
+}
+
+function markKeywordsDirty() {
+  const dirty = keywordsDirty();
+  $('keywords-save').disabled = !dirty;
+  $('keywords-discard').disabled = !dirty;
+  $('keywords-status').textContent = dirty
+    ? `${KEYWORD_DRAFT.filter(Boolean).length} keyword(s), unsaved`
+    : '';
+}
+
+function renderKeywords() {
+  const host = $('keywords-list');
+  host.innerHTML = '';
+  const editable = editableNow();
+  $('keywords-savebar').hidden = !editable;
+
+  if (!KEYWORD_DRAFT || !KEYWORD_DRAFT.length) {
+    host.append(el('p', 'muted', 'No keywords yet.'));
+  }
+  (KEYWORD_DRAFT || []).forEach((term, index) => {
+    const row = el('div', 'kw-row');
+    row.append(el('span', 'idx', String(index + 1)));
+    if (editable) {
+      const input = el('input');
+      input.type = 'text';
+      input.value = term;
+      input.addEventListener('input', () => {
+        KEYWORD_DRAFT[index] = input.value;
+        row.classList.toggle('changed', input.value !== (KEYWORDS[index] || ''));
+        markKeywordsDirty();
+      });
+      const remove = el('button', 'btn sm danger', 'Remove');
+      remove.addEventListener('click', () => {
+        KEYWORD_DRAFT.splice(index, 1);
+        renderKeywords();
+        markKeywordsDirty();
+      });
+      row.append(input, remove);
+    } else {
+      row.append(el('span', '', term));
+    }
+    host.append(row);
+  });
+
+  $('keywords-count').textContent =
+    `${(KEYWORD_DRAFT || []).filter(Boolean).length} keywords`;
+  $('keyword-new').disabled = !editable;
+  $('keyword-add').disabled = !editable;
+  markKeywordsDirty();
+}
+
+async function loadKeywords() {
+  banner($('keywords-error'), '', '');
+  try {
+    if (editableNow()) {
+      const payload = await jsonp(
+        `${SETTINGS_URL}?action=keywords&token=${encodeURIComponent(SESSION_TOKEN)}`);
+      if (!payload.ok) throw new Error(payload.error || 'the service refused the request');
+      KEYWORDS = payload.keywords.keywords || [];
+    } else {
+      // No service: fall back to the published snapshot, read-only.
+      if (!data.cache.Keywords) data.cache.Keywords = await fetchEncrypted('Keywords', KEY);
+      const column = data.cache.Keywords.columns.find((c) => /search term/i.test(c))
+                     || data.cache.Keywords.columns[0];
+      KEYWORDS = data.cache.Keywords.rows
+        .map((r) => (r[column] || '').trim()).filter(Boolean);
+    }
+    KEYWORD_DRAFT = KEYWORDS.slice();
+    renderKeywords();
+    if (!editableNow()) {
+      banner($('keywords-error'), 'warn',
+        'Read-only: the Settings service is not available for this session.');
+    }
+  } catch (err) {
+    banner($('keywords-error'), 'err', `Could not load keywords: ${err.message}`);
+  }
+}
+
+async function saveKeywords() {
+  const list = KEYWORD_DRAFT.map((t) => t.trim()).filter(Boolean);
+  if (!list.length) {
+    banner($('keywords-error'), 'err',
+      'Refusing to save an empty list — a scrape with no keywords finds nothing.');
+    return;
+  }
+  $('keywords-save').disabled = true;
+  $('keywords-status').textContent = 'saving…';
+  banner($('keywords-error'), '', '');
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ token: SESSION_TOKEN, action: 'saveKeywords', keywords: list }),
+    });
+    $('keywords-status').textContent = 'confirming…';
+    const payload = await jsonp(
+      `${SETTINGS_URL}?action=keywords&token=${encodeURIComponent(SESSION_TOKEN)}`);
+    if (!payload.ok) throw new Error(payload.error || 'could not read back');
+    KEYWORDS = payload.keywords.keywords || [];
+    KEYWORD_DRAFT = KEYWORDS.slice();
+    renderKeywords();
+    const same = JSON.stringify(KEYWORDS) === JSON.stringify(list);
+    banner($('keywords-error'), same ? 'ok' : 'err', same
+      ? `Saved ${KEYWORDS.length} keywords. The next scrape will use them.`
+      : 'The sheet does not match what was sent — check the Keywords tab.');
+  } catch (err) {
+    banner($('keywords-error'), 'err', `Could not confirm the save: ${err.message}`);
+  } finally {
+    $('keywords-status').textContent = '';
+    markKeywordsDirty();
+  }
+}
+
 async function saveSettings() {
   const changes = { ...pending };
   const count = Object.keys(changes).length;
@@ -786,6 +912,7 @@ document.querySelectorAll('nav button').forEach((btn) => {
     });
     if (btn.dataset.panel === 'panel-runs') loadRuns();
     if (btn.dataset.panel === 'panel-settings') loadSettings();
+    if (btn.dataset.panel === 'panel-keywords') loadKeywords();
   });
 });
 
@@ -875,3 +1002,24 @@ $('settings-save').addEventListener('click', saveSettings);
 $('settings-discard').addEventListener('click', () => { renderSettings(); });
 
 $('pw-change').addEventListener('click', changePassword);
+
+$('keywords-save').addEventListener('click', saveKeywords);
+$('keywords-discard').addEventListener('click', () => {
+  KEYWORD_DRAFT = KEYWORDS.slice();
+  renderKeywords();
+});
+$('keyword-add').addEventListener('click', () => {
+  const box = $('keyword-new');
+  const term = box.value.trim();
+  if (!term) return;
+  if (KEYWORD_DRAFT.some((t) => t.toLowerCase() === term.toLowerCase())) {
+    banner($('keywords-error'), 'warn', `"${term}" is already in the list.`);
+    return;
+  }
+  KEYWORD_DRAFT.push(term);
+  box.value = '';
+  renderKeywords();
+});
+$('keyword-new').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('keyword-add').click(); }
+});
