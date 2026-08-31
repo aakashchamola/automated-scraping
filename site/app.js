@@ -494,6 +494,25 @@ async function createProject() {
   go.disabled = true;
   go.textContent = 'Creating…';
   try {
+    // Ask FIRST whether this password already belongs to a project.
+    //
+    // Creation is confirmed below by signing in with the password, and the
+    // service refuses a duplicate — so without this check a password that was
+    // already in use would authenticate against the project that owns it and
+    // be reported as "Created", naming someone else's project.
+    let clash = null;
+    try {
+      clash = await jsonp(
+        `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+    } catch { /* unreachable now is handled by the confirmation below */ }
+    if (clash && clash.ok) {
+      err.textContent = 'That password already belongs to a project. ' +
+                        'Choose a different one.';
+      go.disabled = false;
+      go.textContent = 'Create project';
+      return;
+    }
+
     await fetch(SETTINGS_URL, {
       method: 'POST',
       mode: 'no-cors',
