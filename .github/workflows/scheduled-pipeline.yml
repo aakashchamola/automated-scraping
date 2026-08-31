@@ -58,6 +58,11 @@ jobs:
     env:
       # Read by every tool through projects_registry; blank = first active.
       PROJECT_ID: ${{ inputs.project }}
+      # This run log is readable by any signed-in GitHub user while the
+      # repository is public, and the pipeline logs the rows it reads. Keep the
+      # console to warnings; the log FILE still gets everything. See
+      # logger_setup.console_level.
+      LOG_CONSOLE_LEVEL: warning
     steps:
       - uses: actions/checkout@v4
 
@@ -102,14 +107,26 @@ jobs:
           if wanted:
               project = registry.get(wanted)
               if not project:
-                  known = ", ".join(p["id"] for p in active)
-                  raise SystemExit(f"::error::no project {wanted!r}. Known: {known}")
+                  # The count, never the names — this log is readable by any
+                  # signed-in GitHub user while the repository is public.
+                  raise SystemExit(
+                      f"::error::no project {wanted!r} in the control sheet "
+                      f"({len(active)} active project(s) exist)")
           else:
               project = active[0]
-              print(f"::notice::no project given; using '{project['id']}'")
+              print("::notice::no project given; using the first active one")
 
-          print("project     :", project["id"], "-", project.get("name", ""))
-          print("spreadsheet :", project["spreadsheet_id"])
+          # Register the identifiers as masks so that ANY later line which
+          # happens to contain them — from this workflow or from a module deep
+          # in the pipeline — is printed as *** instead. Defence in depth: the
+          # console is already raised to WARNING in CI, but a stray print or a
+          # library warning would not respect that.
+          for secret in (project["id"], project.get("name", ""),
+                         project["spreadsheet_id"]):
+              if secret and len(secret) > 3:
+                  print(f"::add-mask::{secret}")
+
+          print("resolved 1 project from the control sheet")
           PY
 
       - name: Apply the Settings worksheet
@@ -138,7 +155,6 @@ jobs:
           print("platforms this run :", keep)
           print("dropped (blocked)  :", dropped or "none")
           print("writes to sheet    :", cfg["google_sheets"]["enabled"])
-          print("jobs tab           :", cfg["google_sheets"]["jobs_worksheet"])
           PY
 
       - name: Run
@@ -159,7 +175,15 @@ jobs:
           esac
 
       - name: Keep the logs
-        if: always()
+        # PRIVATE REPOSITORIES ONLY. The log file records what the pipeline
+        # reads — company names, career page URLs, search keywords — which is
+        # exactly the sheet content the published dashboard encrypts. On a
+        # public repository an artifact is downloadable by any signed-in GitHub
+        # user, so uploading it would hand that content out for free. Measured,
+        # not assumed: a non-collaborator account downloaded and read this
+        # artifact. The file still exists on the runner for the life of the job,
+        # and a local run keeps full logs either way.
+        if: always() && github.event.repository.private
         uses: actions/upload-artifact@v4
         with:
           name: run-logs-${{ github.run_number }}
@@ -180,6 +204,10 @@ jobs:
     needs: run
     if: always() && needs.run.result != 'cancelled' && needs.run.result != 'failure'
     runs-on: ubuntu-latest
+    env:
+      # Publishing walks every project; without this it would name them all in
+      # a log any signed-in GitHub user can read.
+      LOG_CONSOLE_LEVEL: warning
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -211,13 +239,20 @@ jobs:
       - name: Refuse to publish cleartext
         # Cheap insurance: if the encrypt step ever changes shape, this stops a
         # readable copy of a sheet reaching a public URL.
+        #
+        # It reports COUNTS, never paths: a directory under site/data is named
+        # for its project, and this log is readable by any signed-in GitHub user
+        # while the repository is public. Listing them here would publish the
+        # project names that the design takes care never to disclose.
         run: |
           if find site/data -name '*.json' ! -name '*.enc.json' | grep -q .; then
             echo "::error::cleartext JSON found under site/data — refusing to publish"
-            find site/data -name '*.json' ! -name '*.enc.json'
+            find site/data -name '*.json' ! -name '*.enc.json' -printf '%f\n' | sort -u
             exit 1
           fi
-          echo "only ciphertext present:"; find site/data -type f | sort
+          projects=$(find site/data -mindepth 1 -maxdepth 1 -type d | wc -l)
+          files=$(find site/data -name '*.enc.json' | wc -l)
+          echo "published $projects project(s), $files encrypted files, all ciphertext"
 
       - name: Stamp the build
         run: |
@@ -225,13 +260,21 @@ jobs:
           # service is unreachable and so cannot say which project a password
           # belongs to. It is the first active project, and no others are named
           # — the published page must not disclose what projects exist.
-          DEFAULT_PROJECT=$(python -u - <<'PY'
+          # The value goes to a FILE, not through $( ), so the mask command
+          # below actually reaches the runner — anything printed inside a
+          # command substitution is captured by the shell and the runner never
+          # sees it, so the mask would silently not register.
+          python -u - <<'PY'
           import projects_registry
           from config_loader import load_config
           active = projects_registry.registry_from_config(load_config("config.yaml")).list()
-          print(active[0]["id"] if active else "")
+          default = active[0]["id"] if active else ""
+          if default:
+              print(f"::add-mask::{default}")
+          with open("default-project.txt", "w", encoding="utf-8") as fh:
+              fh.write(default)
           PY
-          )
+          DEFAULT_PROJECT=$(cat default-project.txt)
           cat > site/config.js <<JS
           window.DASHBOARD_CONFIG = {
             repo: "${{ github.repository }}",
@@ -242,7 +285,17 @@ jobs:
             defaultProject: "$DEFAULT_PROJECT",
           };
           JS
-          echo "default project: $DEFAULT_PROJECT"
+          # Fail loudly rather than shipping a page with no fallback project.
+          # Without this the site publishes defaultProject:"" and the only
+          # symptom is that sign-in breaks when the Settings service is down —
+          # a failure mode nobody would connect back to this step.
+          if [ -z "$DEFAULT_PROJECT" ]; then
+            echo "::error::could not determine the default project from the control sheet"
+            exit 1
+          fi
+          # Deliberately not echoed: a project id is derived from its name.
+          echo "default project stamped"
+          rm -f default-project.txt
           if [ -z "${{ secrets.SETTINGS_WEB_APP_URL }}" ]; then
             echo "::notice::SETTINGS_WEB_APP_URL is not set — Settings and Keywords will be read-only and projects cannot be created."
           fi
