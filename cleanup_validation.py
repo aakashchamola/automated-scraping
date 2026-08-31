@@ -298,6 +298,15 @@ def run_cleanup(config: dict[str, Any]) -> None:
             allowed_display[norm] = stripped
 
     allowed = set(allowed_display.keys())
+    if not allowed:
+        # Every target row is stale when nothing is allowed, so this would
+        # clear the whole sheet. It happens for a boring reason — a renamed or
+        # missing company header makes _read_column return nothing — and the
+        # run would look like a successful cleanup.
+        raise SystemExit(
+            "refusing to run: the allowed-company list is empty, which would "
+            "clear every row in the target sheet. Check that the Jobs and "
+            "Company tabs still have their company-name headers.")
 
     logger.info("Jobs unique companies: %s", len(jobs_set))
     logger.info("Source unique companies: %s", len(source_set))
@@ -428,13 +437,29 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg = _load_json(args.config)
+
     # This tool carries its own JSON config, so the project has to be looked up
     # from the main config's control block and pushed into the right place.
-    if args.project:
-        project = projects_registry.lookup(args.project)
-        if project:
-            cfg["cleanup_validation"]["google_sheets"]["spreadsheet_id"] = \
-                project["spreadsheet_id"]
+    #
+    # It resolves the project even when none was named, exactly like every
+    # other tool. It used to fall through to the spreadsheet id hardcoded in
+    # the JSON, which meant a scheduled run — where no project is given —
+    # DELETED ROWS from whichever sheet that file happened to name, no matter
+    # which project the rest of the run was working on.
+    project = projects_registry.lookup(args.project)
+    if project:
+        sheets = cfg["cleanup_validation"]["google_sheets"]
+        configured = (sheets.get("spreadsheet_id") or "").strip()
+        if configured and configured != project["spreadsheet_id"]:
+            # Two answers to "which sheet" and no way to tell which was meant.
+            # This step deletes rows, so it stops rather than picking one.
+            sys.exit(
+                f"refusing to run: --config names one spreadsheet and project "
+                f"{project['id']!r} another. Clear spreadsheet_id from "
+                f"{args.config} so the project decides, or run with the "
+                f"matching --project.")
+        sheets["spreadsheet_id"] = project["spreadsheet_id"]
+
     setup_logging_from_config(cfg)
     logger.info(
         "Logger initialized from config | level=%s",

@@ -269,6 +269,20 @@ function check(label, ok, detail) {
     check('the live sheet is read for the project you are in',
           mainValue === '3', 'got ' + JSON.stringify(mainValue));
 
+    console.log('\na remembered session survives a bad network');
+    // Throwing a session away on any error would make one offline reload cost
+    // every remembered project its full ten days.
+    await page.route('**/data/**', route => route.abort());
+    await page.reload();
+    await page.waitForTimeout(1500);
+    await page.unroute('**/data/**');
+    await page.reload();
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    check('an offline reload does not sign you out',
+          await page.isHidden('#gate'));
+    check('and both projects are still remembered',
+          (await page.$$eval('#project-menu .menu-item', n => n.length)) >= 0);
+
     console.log('\nlocking');
     await page.click('#btn-lock');
     await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });

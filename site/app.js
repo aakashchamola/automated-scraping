@@ -298,12 +298,24 @@ async function resume() {
       await enter({ id, name: rec.name || id }, rec.key, rec.token);
       await touchSession(id);
       return true;
-    } catch {
-      await forgetSession(id);      // stale; try the next one
+    } catch (err) {
+      // Only a key that no longer decrypts means the session is finished. Any
+      // other failure is the network, and throwing the session away for that
+      // would make one offline reload cost every remembered project its full
+      // ten days.
+      if (staleKey(err)) await forgetSession(id);
     }
   }
   SESSION = null;
   return false;
+}
+
+/* Whether a failure means the remembered key is finished, as opposed to the
+   network being down. WebCrypto raises OperationError when AES-GCM cannot
+   authenticate the ciphertext, which is exactly the "republished under a new
+   key" case; a fetch that failed or 404'd is not that. */
+function staleKey(err) {
+  return Boolean(err) && err.name === 'OperationError';
 }
 
 async function switchTo(projectId) {
@@ -315,6 +327,13 @@ async function switchTo(projectId) {
     await enter({ id: projectId, name: rec.name || projectId }, rec.key, rec.token);
     await touchSession(projectId);
   } catch (err) {
+    if (!staleKey(err)) {
+      // Offline, or the file is briefly missing mid-publish. The session is
+      // still good, so keep it and say what actually went wrong.
+      banner($('data-error'), 'err',
+        `Could not open ${rec.name || projectId}: ${err.message}`);
+      return;
+    }
     // Its data was republished under a different key, or removed.
     await forgetSession(projectId);
     openGate({ extra: true, message:
@@ -950,7 +969,12 @@ async function changePassword() {
     // revoked the old one.
     const check = await jsonp(
       `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(next)}`);
-    if (check.ok) {
+    // It must be THIS project that answers. A password the service refused —
+    // because another project already uses it — would still authenticate
+    // successfully against that other project, and taking that as proof would
+    // report a change that never happened and store someone else's session
+    // token under this project.
+    if (check.ok && PROJECT && check.project === PROJECT.id) {
       SESSION_TOKEN = check.token;
       if (remainingDays() && PROJECT) {
         await rememberSession(PROJECT.id, PROJECT.name, KEY, SESSION_TOKEN);
@@ -960,6 +984,11 @@ async function changePassword() {
       banner($('settings-error'), 'ok',
         'Password changed. Everyone signed in elsewhere will have to sign in again ' +
         'with the new one.');
+    } else if (check.ok) {
+      status.textContent = '';
+      banner($('settings-error'), 'err',
+        'The password was not changed — it already belongs to a different ' +
+        'project. Choose another one.');
     } else {
       status.textContent = '';
       banner($('settings-error'), 'err',
