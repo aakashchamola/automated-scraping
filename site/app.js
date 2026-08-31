@@ -202,11 +202,9 @@ class AuthError extends Error {
    exactly what makes it changeable from this page — changing an encryption key
    would strand every already-published file.
 
-   Without a reachable service the project cannot be identified, so the page
-   falls back to the one stamped in at publish time and tries the password as
-   the key. That is how this site worked before it had projects, and it keeps a
-   single-project setup usable while the service is down; a project whose key
-   is not its password simply will not open, which is correct. */
+   Without a reachable service there is no sign-in at all: only it knows which
+   project a password belongs to, and it is the only thing holding the data
+   keys. That is deliberate — see the fallback note below. */
 async function unlock(password, remember) {
   let key = null;
   let project = null;
@@ -234,14 +232,17 @@ async function unlock(password, remember) {
   }
 
   if (!key) {
-    const fallbackId = (CFG.defaultProject || '').trim();
-    if (!fallbackId) {
-      throw new Error('the Settings service is unreachable, so the project ' +
-                      'cannot be identified');
-    }
-    project = { id: fallbackId, name: fallbackId };
-    const payload = await fetchPayloadFor(fallbackId, 'index');
-    key = await deriveKey(password, payload.kdf);
+    // There is deliberately no offline fallback.
+    //
+    // It used to try a project id stamped into config.js at publish time. That
+    // put a real project id on a world-readable URL, which is the one thing
+    // this design promises not to do — and it could only ever have worked for
+    // a project whose data key happened to equal its password, which is true
+    // of no project created since. A clear failure is worth more than a
+    // fallback that leaks and does not work.
+    throw new AuthError(
+      'The sign-in service is unreachable, so this password cannot be checked. ' +
+      'Try again in a moment.');
   }
 
   await enter(project, key, token, remember);
@@ -268,6 +269,12 @@ async function enter(project, key, token, remember = false) {
   SETTINGS_ROWS = null;
   KEYWORDS = null;
   KEYWORD_DRAFT = null;
+  // Unsaved edits belong to the project they were typed in. Carrying them over
+  // would write one project's settings into another's spreadsheet on the next
+  // save — silently, since the panel would look the same either way.
+  Object.keys(pending).forEach((key) => { delete pending[key]; });
+  const savebar = $('settings-savebar');
+  if (savebar) savebar.hidden = true;
 
   if (remember) await rememberSession(project.id, project.name, key, token);
   SESSION = (await loadSessions())[project.id] || null;
@@ -608,7 +615,12 @@ function renderTable() {
     data.columns.forEach((col) => {
       const td = el('td');
       const value = row[col] || '';
-      const url = row[`${col}__url`] || (/^https?:\/\//.test(value) ? value : null);
+      // Only ever http(s). The target comes from a HYPERLINK formula in the
+      // sheet, which is data — a javascript: URL there would otherwise run in
+      // the dashboard the moment someone clicked the cell.
+      const candidate = row[`${col}__url`] || value;
+      const url = /^https?:\/\//i.test(String(candidate || '').trim())
+        ? String(candidate).trim() : null;
       const pill = statusPill(col, value);
       if (pill) td.append(pill);
       else if (url) {

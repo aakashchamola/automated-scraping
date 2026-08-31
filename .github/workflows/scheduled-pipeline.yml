@@ -256,25 +256,9 @@ jobs:
 
       - name: Stamp the build
         run: |
-          # defaultProject is the fallback the page uses when the Settings
-          # service is unreachable and so cannot say which project a password
-          # belongs to. It is the first active project, and no others are named
-          # — the published page must not disclose what projects exist.
-          # The value goes to a FILE, not through $( ), so the mask command
-          # below actually reaches the runner — anything printed inside a
-          # command substitution is captured by the shell and the runner never
-          # sees it, so the mask would silently not register.
-          python -u - <<'PY'
-          import projects_registry
-          from config_loader import load_config
-          active = projects_registry.registry_from_config(load_config("config.yaml")).list()
-          default = active[0]["id"] if active else ""
-          if default:
-              print(f"::add-mask::{default}")
-          with open("default-project.txt", "w", encoding="utf-8") as fh:
-              fh.write(default)
-          PY
-          DEFAULT_PROJECT=$(cat default-project.txt)
+          # Nothing project-specific goes in here. config.js is served from a
+          # world-readable URL, and a project id is derived from its name, so
+          # stamping one would disclose exactly what the design hides.
           cat > site/config.js <<JS
           window.DASHBOARD_CONFIG = {
             repo: "${{ github.repository }}",
@@ -282,20 +266,8 @@ jobs:
             branch: "${{ github.ref_name }}",
             builtAt: "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             settingsWebApp: "${{ secrets.SETTINGS_WEB_APP_URL }}",
-            defaultProject: "$DEFAULT_PROJECT",
           };
           JS
-          # Fail loudly rather than shipping a page with no fallback project.
-          # Without this the site publishes defaultProject:"" and the only
-          # symptom is that sign-in breaks when the Settings service is down —
-          # a failure mode nobody would connect back to this step.
-          if [ -z "$DEFAULT_PROJECT" ]; then
-            echo "::error::could not determine the default project from the control sheet"
-            exit 1
-          fi
-          # Deliberately not echoed: a project id is derived from its name.
-          echo "default project stamped"
-          rm -f default-project.txt
           if [ -z "${{ secrets.SETTINGS_WEB_APP_URL }}" ]; then
             echo "::notice::SETTINGS_WEB_APP_URL is not set — Settings and Keywords will be read-only and projects cannot be created."
           fi

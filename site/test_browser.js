@@ -53,7 +53,6 @@ function buildSite(root) {
       branch: 'test',
       builtAt: new Date().toISOString(),
       settingsWebApp: 'http://127.0.0.1:' + STUB_PORT + '/exec',
-      defaultProject: 'main',
     })};`);
 
   for (const [id, spec] of Object.entries(PROJECTS)) {
@@ -278,6 +277,21 @@ function check(label, ok, detail) {
     await page.waitForSelector('#gate:not([hidden])');
     check('and it stays locked after a reload', await page.isHidden('#app'));
 
+    console.log('\nwhen the sign-in service is down');
+    // There is no offline fallback any more: it stamped a real project id into
+    // a world-readable config.js, and only ever worked for a project whose
+    // data key happened to equal its password.
+    stub.server.close();
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('main-password-1');
+    await page.waitForFunction(() => document.getElementById('gate-err').textContent.trim(),
+                               null, { timeout: 20000 });
+    const downMessage = await page.textContent('#gate-err');
+    check('it says so plainly rather than failing as a crypto error',
+          /unreachable/i.test(downMessage), downMessage);
+    check('and does not let anyone in', await page.isHidden('#app'));
+
     check('no uncaught page errors throughout', errors.length === 0, errors.join('\n       '));
   } catch (ex) {
     failed++;
@@ -290,7 +304,7 @@ function check(label, ok, detail) {
   } finally {
     await browser.close();
     site.close();
-    stub.server.close();
+    try { stub.server.close(); } catch { /* the last test closes it */ }
     fs.rmSync(root, { recursive: true, force: true });
   }
 

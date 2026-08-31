@@ -161,6 +161,10 @@ function makeWorld() {
   return world;
 }
 
+function _projectCount(world) {
+  return world.sheets['ctrl'].getSheetByName('Projects').rows.length - 1;
+}
+
 function seedProjects(sandbox, world) {
   const control = world.sheets['ctrl'].getSheetByName('Projects');
   [['alpha', 'Alpha Ltd', 'sheet-a', 'pw-alpha-secret'],
@@ -314,19 +318,82 @@ console.log('\nSettings.gs\n');
 
 {
   const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
-  console.log('\nadopting an existing sheet');
+  console.log('\nadopting an existing sheet is privileged');
   const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
   world.sheets['adopt-me'] = new FakeSpreadsheet('adopt-me', [new FakeSheet('Jobs', [['Company']])]);
-  const made = post(s, { action: 'createProject', token: auth.token, name: 'Adopted',
+
+  // Creating a sheet makes an empty one. Adopting names a sheet that already
+  // exists, and this script can open any sheet its owner can — so a tenant
+  // holding one project's password must not be able to point a project of
+  // their own at somebody else's data.
+  const unprivileged = post(s, { action: 'createProject', token: auth.token, name: 'Adopted',
+                                 password: 'adopted-secret', spreadsheetId: 'adopt-me' });
+  check('a project password alone cannot adopt a sheet',
+        unprivileged.ok === false && /ADMIN_PASSWORD/.test(unprivileged.error), unprivileged.error);
+  check('and nothing was registered', _projectCount(world) === 3, String(_projectCount(world)));
+
+  const stolen = post(s, { action: 'createProject', token: auth.token, name: 'Steal',
+                           password: 'steal-secret-1', spreadsheetId: 'sheet-b' });
+  check('another project\'s spreadsheet cannot be claimed', stolen.ok === false);
+
+  world.props.ADMIN_PASSWORD = 'admin-only-pw';
+  const wrongAdmin = post(s, { action: 'createProject', adminPassword: 'nope', name: 'Adopted',
+                               password: 'adopted-secret', spreadsheetId: 'adopt-me' });
+  check('a wrong admin password cannot adopt', wrongAdmin.ok === false);
+
+  const control = post(s, { action: 'createProject', adminPassword: 'admin-only-pw', name: 'Registry',
+                            password: 'registry-secret', spreadsheetId: 'ctrl' });
+  check('the control spreadsheet cannot be registered as a project',
+        control.ok === false && /control spreadsheet/.test(control.error), control.error);
+
+  const taken = post(s, { action: 'createProject', adminPassword: 'admin-only-pw', name: 'Dup',
+                          password: 'dup-secret-1', spreadsheetId: 'sheet-b' });
+  check('a spreadsheet already in use cannot be adopted twice',
+        taken.ok === false && /already uses that spreadsheet/.test(taken.error), taken.error);
+
+  const made = post(s, { action: 'createProject', adminPassword: 'admin-only-pw', name: 'Adopted',
                          password: 'adopted-secret', spreadsheetId: 'adopt-me' });
-  check('no new sheet is created', made.ok === true && made.createdSheet === false);
+  check('with the admin password it works', made.ok === true && made.createdSheet === false,
+        JSON.stringify(made));
   const tabs = world.sheets['adopt-me'].getSheets().map(x => x.name);
   check('missing tabs are added', tabs.includes('Settings') && tabs.includes('Keywords'));
   check('the existing tab keeps its header',
         world.sheets['adopt-me'].getSheetByName('Jobs').rows[0][0] === 'Company');
-  const missing = post(s, { action: 'createProject', token: auth.token, name: 'Ghost',
+
+  const missing = post(s, { action: 'createProject', adminPassword: 'admin-only-pw', name: 'Ghost',
                             password: 'ghost-secret', spreadsheetId: 'does-not-exist' });
   check('an unreachable sheet is refused rather than registered', missing.ok === false);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nnames are written as text, not formulas');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  // appendRow writes as if typed, and a formula in the control sheet would run
+  // as its owner — with IMPORTRANGE and friends available.
+  const made = post(s, { action: 'createProject', token: auth.token,
+                         password: 'formula-secret-1',
+                         name: '=IMPORTRANGE("other","A1")' });
+  check('a project is still created', made.ok === true, JSON.stringify(made));
+  const row = world.sheets['ctrl'].getSheetByName('Projects').rows.slice(-1)[0];
+  check('but the name is neutralised with a leading apostrophe',
+        String(row[1]).charAt(0) === "'", JSON.stringify(row[1]));
+  const notes = post(s, { action: 'createProject', token: auth.token, name: 'Notes',
+                          password: 'notes-secret-1', notes: '+1+1' });
+  const notesRow = world.sheets['ctrl'].getSheetByName('Projects').rows.slice(-1)[0];
+  check('and so are notes', String(notesRow[8]).charAt(0) === "'", JSON.stringify(notesRow[8]));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\narchiving ends the sessions too');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  check('the session works while active', get(s, { token: auth.token }).ok === true);
+  const control = world.sheets['ctrl'].getSheetByName('Projects');
+  const row = control.rows.findIndex(r => r[0] === 'alpha');
+  control.rows[row][3] = 'archived';
+  check('and stops the moment the project is archived',
+        get(s, { token: auth.token }).ok === false);
 }
 
 {

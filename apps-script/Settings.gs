@@ -293,7 +293,11 @@ function _authorise(params) {
   var viaToken = _tokenProject(params.token || '');
   if (viaToken) {
     var project = _projectById(viaToken);
-    if (project) return project;
+    // Archiving is how a project is taken away, so it has to end the sessions
+    // too — otherwise a token issued beforehand keeps working indefinitely.
+    if (project && String(project.status || '').toLowerCase() !== 'archived') {
+      return project;
+    }
   }
   return _projectByPassword(params.password || '');
 }
@@ -454,6 +458,19 @@ function _randomKey() {
   return Utilities.base64EncodeWebSafe(raw).replace(/=+$/, '');
 }
 
+/**
+ * Neutralise a value that a person chose, before it is written to a sheet.
+ *
+ * appendRow writes as if typed, so a name beginning with = + - or @ becomes a
+ * live formula in the control sheet — and a formula there runs as the owner,
+ * with IMPORTRANGE and friends available. A leading apostrophe makes Sheets
+ * treat it as text; it is not shown in the cell.
+ */
+function _plainText(value) {
+  var text = String(value == null ? '' : value);
+  return /^[=+\-@]/.test(text) ? "'" + text : text;
+}
+
 function _slugify(name) {
   var slug = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
              .replace(/^-+|-+$/g, '');
@@ -508,8 +525,33 @@ function _createProject(body) {
   var url = '';
 
   if (spreadsheetId) {
-    // Adopting a sheet that already exists — open it before a registry row
-    // promises that it can be opened.
+    // ADOPTION IS PRIVILEGED, creation is not.
+    //
+    // Creating a sheet makes an empty one nobody else has anything in.
+    // Adopting names a sheet that already exists, and this script can open
+    // ANY sheet its owner can — so without this check a tenant holding one
+    // project's password could point a new project of their own at another
+    // project's spreadsheet, give it a password they choose, and read and
+    // write it. That is exactly the isolation the whole design rests on.
+    if (!_adminPassword()) {
+      throw new Error('adopting an existing spreadsheet requires ADMIN_PASSWORD ' +
+        'to be set in Script Properties. Without it, only new sheets may be ' +
+        'created.');
+    }
+    if (!_constantTimeEquals(_adminPassword(), String(body.adminPassword || ''))) {
+      throw new Error('the admin password is not correct');
+    }
+    if (spreadsheetId === _controlId()) {
+      throw new Error('that is the control spreadsheet, not a project');
+    }
+    var alreadyUsed = _projects().filter(function (p) {
+      return String(p.spreadsheet_id).trim() === spreadsheetId;
+    });
+    if (alreadyUsed.length) {
+      throw new Error('another project already uses that spreadsheet');
+    }
+
+    // Open it before a registry row promises that it can be opened.
     var existing = SpreadsheetApp.openById(spreadsheetId);
     url = existing.getUrl();
     _ensureTemplateTabs(existing);
@@ -551,14 +593,14 @@ function _createProject(body) {
   var salt = _randomKey().substring(0, 32);
   var record = {
     id: projectId,
-    name: name,
+    name: _plainText(name),
     spreadsheet_id: spreadsheetId,
     status: 'active',
     data_key: _randomKey(),
     pw_salt: salt,
     pw_hash: _hashPassword(password, salt),
     created_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
-    notes: String(body.notes || '')
+    notes: _plainText(String(body.notes || ''))
   };
 
   var control = _controlSheet();
