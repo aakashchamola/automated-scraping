@@ -190,7 +190,7 @@ classification:
 # service account as Editor, and add a row to the registry.
 control:
   enabled: true
-  spreadsheet_id: 1opBzNjpVU2RIkRPo_wgcPjgKx6-iZT_ZCrmICA7AjHY
+  spreadsheet_id: 1G5dfGeTKxLqJRQUdngvAosVl0uoeCxWpfctDc0DzZiM
   worksheet: Projects
 
 
