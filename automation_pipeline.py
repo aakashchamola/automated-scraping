@@ -150,12 +150,42 @@ def run_validation(config: dict) -> None:
         logger.warning("Google Sheets not enabled; skipping validation")
         return
     store = GoogleSheetsStore(gs_config)
+    worksheet = gs_config.get("jobs_worksheet", "Jobs")
+    status_column = "Job Status"
+
+    # The job_validation block is read HERE, not just by job_validator.py's own
+    # CLI. Without this the pipeline ran on the function defaults, so a full run
+    # re-checked every row that already had a status — hours of work to learn
+    # nothing — and never removed a row, however the setting was left. The
+    # dashboard offers both switches, so both have to mean something on every
+    # path that validates.
+    validation_cfg = config.get("job_validation", {}) or {}
+    re_validate = validation_cfg.get("re_validate", True)
+
     job_validator.validate_jobs(
         store,
-        worksheet=gs_config.get("jobs_worksheet", "Jobs"),
+        worksheet=worksheet,
         job_url_column="Job Link",
-        status_column="Job Status",
+        status_column=status_column,
+        re_validate=re_validate,
     )
+
+    if validation_cfg.get("remove_rows", False):
+        statuses = validation_cfg.get("remove_statuses") or []
+        if statuses:
+            logger.info(f"Removing rows with status: {', '.join(statuses)}")
+            job_validator.remove_rows_by_status(
+                store, worksheet, status_column, statuses)
+        else:
+            # An empty list with removal on would otherwise read as "remove
+            # everything" to a careless implementation, and as a no-op here.
+            # Say which it is.
+            logger.warning(
+                "job_validation.remove_rows is on but remove_statuses is empty; "
+                "nothing will be removed")
+    else:
+        logger.info("Row removal is off (job_validation.remove_rows)")
+
     logger.info("Job validation complete")
 
 
