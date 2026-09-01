@@ -197,6 +197,7 @@ def validate_jobs(
     checked = 0
     updated = 0
     row_colors = []   # (row_num, bg_color or None) — collected for one batch call
+    pending_status = {}   # row_num -> status, written as one column at the end
 
     for row_num, row in enumerate(rows[1:], start=2):
         url = row[url_idx].strip() if url_idx < len(row) else ""
@@ -216,12 +217,14 @@ def validate_jobs(
         checked += 1
 
         if existing != status:
-            try:
-                sheet_store.update_cell(row_num, status_col_pos, status, worksheet)
-                updated += 1
-                logger.info(f"Row {row_num}: '{status}'  ({url[:70]})")
-            except Exception as exc:
-                logger.error(f"Failed to update row {row_num}: {exc}")
+            # Queued, not written. One update_cell per row costs one API write
+            # per row, and Sheets allows sixty a minute — so a few hundred rows
+            # hit a 429, every further write failed, and the run still reported
+            # success over a half-filled column. The whole column goes out in
+            # one batched call below instead.
+            pending_status[row_num] = status
+            updated += 1
+            logger.info(f"Row {row_num}: '{status}'  ({url[:70]})")
 
         # Always queue a row color — regardless of whether the status changed
         row_colors.append((row_num, _status_color(status)))
@@ -234,6 +237,27 @@ def validate_jobs(
             logger.info(f"Reached --limit {limit}; stopping")
             break
 
+    # One batched write for the whole status column. Rows that were skipped or
+    # unchanged keep what they already had, so the existing value is written
+    # back rather than blanked.
+    write_failed = None
+    if pending_status:
+        highest = max(pending_status)
+        column = []
+        for row_num in range(2, highest + 1):
+            if row_num in pending_status:
+                column.append([pending_status[row_num]])
+            else:
+                source = rows[row_num - 1]
+                column.append([source[status_idx] if status_idx < len(source) else ""])
+        try:
+            sheet_store.write_column_values(
+                status_col_pos, column, worksheet, start_row=2)
+        except Exception as exc:
+            # Never let a failed write pass for a completed validation.
+            write_failed = exc
+            logger.error(f"Failed to write the status column: {exc}")
+
     # Batch-apply all row background colors in one API call
     if row_colors:
         logger.info(f"Applying row colors to {len(row_colors)} rows…")
@@ -241,6 +265,14 @@ def validate_jobs(
             sheet_store.batch_format_rows(row_colors, num_cols=num_cols, worksheet_name=worksheet)
         except Exception as exc:
             logger.warning(f"Batch row formatting failed: {exc}")
+
+    if write_failed is not None:
+        # Loudly, and as a failure. The previous version logged one error per
+        # row and returned a summary that read like a clean run, so a
+        # half-validated sheet looked finished.
+        raise RuntimeError(
+            f"validated {checked} jobs but could not write the '{status_column}' "
+            f"column, so the sheet is unchanged: {write_failed}")
 
     logger.info(
         f"Validation done. checked={checked} updated={updated} | "

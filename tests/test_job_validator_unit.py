@@ -112,6 +112,8 @@ class FakeStore:
         self._rows = rows
         self.updates = []          # (row, col, value)
         self.row_colors = []       # (row_num, bg_color) recorded by batch_format_rows
+        self.column_writes = []    # (col, start_row, values) — one per batched write
+        self.write_raises = None   # set to a message to simulate a failing write
         self._ensured = {}
 
     def load_all_rows(self, worksheet_name=None):
@@ -126,6 +128,11 @@ class FakeStore:
 
     def update_cell(self, row, col, value, worksheet_name=None):
         self.updates.append((row, col, value))
+
+    def write_column_values(self, col, values, worksheet_name=None, start_row=2):
+        if self.write_raises:
+            raise RuntimeError(self.write_raises)
+        self.column_writes.append((col, start_row, [v[0] for v in values]))
 
     def batch_format_rows(self, row_colors, num_cols=0, worksheet_name=None):
         self.row_colors.extend(row_colors)
@@ -147,13 +154,60 @@ class ValidateJobsFlowTest(unittest.TestCase):
 
         # Status column auto-added at position 4.
         self.assertEqual(store._rows[0][-1], "Job Status")
-        # Two writes (one per row with a URL), at column 4.
-        self.assertEqual(store.updates, [
-            (2, 4, jv.STATUS_ACTIVE),
-            (3, 4, jv.STATUS_REMOVED),
-        ])
+        # ONE batched write for the whole column, not one per row. Sheets allows
+        # sixty writes a minute, so per-row writes 429 on a few hundred rows and
+        # leave the rest blank.
+        self.assertEqual(store.updates, [], "no per-row writes should be made")
+        self.assertEqual(len(store.column_writes), 1)
+        col, start_row, values = store.column_writes[0]
+        self.assertEqual((col, start_row), (4, 2))
+        self.assertEqual(values, [jv.STATUS_ACTIVE, jv.STATUS_REMOVED])
         self.assertEqual(summary[jv.STATUS_ACTIVE], 1)
         self.assertEqual(summary[jv.STATUS_REMOVED], 1)
+
+    @mock.patch("job_validator.check_job_url")
+    def test_one_write_however_many_rows(self, mock_check):
+        rows = [["Company", "Job Link", "Job Status"]]
+        rows += [[f"C{n}", f"https://x.test/{n}", ""] for n in range(300)]
+        mock_check.return_value = jv.STATUS_ACTIVE
+        store = FakeStore(rows)
+
+        jv.validate_jobs(store, worksheet="Jobs_Test", delay_every=999)
+
+        self.assertEqual(len(store.column_writes), 1,
+                         "300 rows must still cost exactly one column write")
+        self.assertEqual(len(store.column_writes[0][2]), 300)
+
+    @mock.patch("job_validator.check_job_url")
+    def test_rows_that_were_skipped_keep_their_value(self, mock_check):
+        # The column is rewritten wholesale, so anything not re-checked has to
+        # be written back as it was rather than blanked.
+        rows = [
+            ["Company", "Job Link", "Job Status"],
+            ["Done", "https://x.test/1", jv.STATUS_EXPIRED],   # skipped
+            ["New", "https://x.test/2", ""],                   # checked
+        ]
+        mock_check.side_effect = [jv.STATUS_ACTIVE]
+        store = FakeStore(rows)
+
+        jv.validate_jobs(store, worksheet="Jobs_Test", delay_every=999,
+                         re_validate=False)
+
+        self.assertEqual(store.column_writes[0][2],
+                         [jv.STATUS_EXPIRED, jv.STATUS_ACTIVE])
+
+    @mock.patch("job_validator.check_job_url")
+    def test_a_failed_write_is_not_reported_as_success(self, mock_check):
+        # A quota error used to be logged per row while the summary still read
+        # like a clean run, so a half-validated sheet looked finished.
+        rows = [["Company", "Job Link"], ["Acme", "https://acme.test/1"]]
+        mock_check.return_value = jv.STATUS_ACTIVE
+        store = FakeStore(rows)
+        store.write_raises = "[429]: Quota exceeded for 'Write requests'"
+
+        with self.assertRaises(RuntimeError) as caught:
+            jv.validate_jobs(store, worksheet="Jobs_Test", delay_every=999)
+        self.assertIn("429", str(caught.exception))
 
     def test_missing_url_column_returns_empty(self):
         store = FakeStore([["Company", "Role"], ["Acme", "Eng"]])
