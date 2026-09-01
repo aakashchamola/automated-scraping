@@ -47,5 +47,15 @@ else
 fi
 
 echo
+echo "── Live deployment ────────────────────────────────────────────────────"
+# Opt-in: it needs a real project password, and it exercises the deployed site
+# rather than this working tree.
+if [ -n "${DASHBOARD_PASSWORD:-}" ] && [ -n "${PLAYWRIGHT_PATH:-}" ]; then
+    PLAYWRIGHT_PATH="$PLAYWRIGHT_PATH" node site/test_live.js || failed=1
+else
+    echo "  skipped: set DASHBOARD_PASSWORD to check the live deployment"
+fi
+
+echo
 [ $failed -eq 0 ] && echo "everything passed" || echo "SOMETHING FAILED"
 exit $failed
