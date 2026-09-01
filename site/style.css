@@ -295,27 +295,28 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 .menu {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
   min-width: 230px; padding: 5px;
-  background: var(--card, #fff); border: 1px solid var(--line, #e2e5ea);
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 10px; box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
 }
 .menu-item {
   display: flex; align-items: center; gap: 8px;
   width: 100%; padding: 8px 10px; border: 0; border-radius: 7px;
-  background: none; font: inherit; font-size: 13.5px; color: inherit;
+  background: none; font: inherit; font-size: 13.5px; color: var(--text);
   text-align: left; cursor: pointer;
 }
-.menu-item:hover { background: var(--hover, #f1f5f9); }
+.menu-item:hover, .menu-item:focus-visible { background: var(--surface-2); }
 .menu-item.current { font-weight: 600; }
-.menu-item.danger { color: #b42318; }
+.menu-item.danger { color: var(--err); }
 .menu-item .tick { width: 12px; opacity: .8; }
-.menu-sep { height: 1px; margin: 5px 4px; background: var(--line, #e2e5ea); }
+.menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
 
 /* ── New-project dialog ─────────────────────────────────────────────────── */
 #new-project {
   width: min(460px, calc(100vw - 32px));
   padding: 22px; border: 0; border-radius: 14px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, .28);
-  color: inherit; background: var(--card, #fff);
+  color: var(--text); background: var(--surface);
 }
 #new-project::backdrop { background: rgba(15, 23, 42, .45); }
 #new-project h2 { margin: 0 0 6px; font-size: 17px; }
@@ -324,7 +325,8 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 }
 #new-project input[type="text"], #new-project input[type="password"] {
   width: 100%; padding: 9px 11px; font: inherit; font-size: 14px;
-  border: 1px solid var(--line, #d6dbe3); border-radius: 8px; background: inherit;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg);
   color: inherit; box-sizing: border-box;
 }
 #new-project .hint { margin: 6px 0 0; font-size: 12px; opacity: .7; }
@@ -335,7 +337,7 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 }
 #np-done {
   margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 13px;
-  background: #ecfdf3; color: #05603a; border: 1px solid #abefc6;
+  background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok);
 }
 
 /* The gate is toggled with [hidden]; its flex layout must not win over that.

@@ -28,6 +28,7 @@ import re
 import sys
 import time
 import projects_registry
+from google_sheets_store import sheets_call
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -132,41 +133,14 @@ def _gspread_client(creds):
     return gspread.authorize(creds)
 
 
-def _sheets_call(fn, *args, retries: int = 4, backoff: float = 8.0, **kwargs):
-    """Call gspread method with retry on transient network/API errors."""
-    import gspread.exceptions
+def _sheets_call(fn, *args, **kwargs):
+    """Retry wrapper for gspread calls — see google_sheets_store.sheets_call.
 
-    last_exc: Exception = RuntimeError("No attempts made")
-    for attempt in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            last_exc = exc
-            wait = backoff * (2 ** attempt)
-            logger.warning(
-                "Sheets network error (attempt %s/%s), retrying in %.0fs: %s",
-                attempt + 1,
-                retries,
-                wait,
-                exc,
-            )
-            time.sleep(wait)
-        except gspread.exceptions.APIError as exc:
-            status = getattr(exc.response, "status_code", 0)
-            if status in (429, 500, 502, 503, 504):
-                last_exc = exc
-                wait = backoff * (2 ** attempt)
-                logger.warning(
-                    "Sheets API error %s (attempt %s/%s), retrying in %.0fs",
-                    status,
-                    attempt + 1,
-                    retries,
-                    wait,
-                )
-                time.sleep(wait)
-            else:
-                raise
-    raise last_exc
+    Kept as a thin alias because this module calls it in several places. The
+    implementation is shared so the two copies that used to live here and in
+    company_enricher.py cannot drift apart again.
+    """
+    return sheets_call(fn, *args, **kwargs)
 
 
 def _get_worksheet(spreadsheet, name: str):

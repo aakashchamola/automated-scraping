@@ -25,6 +25,7 @@ import time
 import requests
 
 import projects_registry
+from google_sheets_store import sheets_call
 from config_loader import load_config
 
 from enricher import config as config_helpers
@@ -110,38 +111,14 @@ def _sheets_api(creds):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
-def _sheets_call(fn, *args, retries: int = 4, backoff: float = 8.0, **kwargs):
-    """Call a gspread method with retry on transient network / API errors."""
-    import gspread.exceptions
+def _sheets_call(fn, *args, **kwargs):
+    """Retry wrapper for gspread calls — see google_sheets_store.sheets_call.
 
-    last_exc: Exception = RuntimeError("No attempts made")
-    for attempt in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except (
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-        ) as exc:
-            last_exc = exc
-            wait = backoff * (2 ** attempt)
-            logger.warning(
-                f"Sheets network error (attempt {attempt + 1}/{retries}), "
-                f"retrying in {wait:.0f}s: {exc}"
-            )
-            time.sleep(wait)
-        except gspread.exceptions.APIError as exc:
-            status = getattr(exc.response, "status_code", 0)
-            if status in (429, 500, 502, 503, 504):
-                last_exc = exc
-                wait = backoff * (2 ** attempt)
-                logger.warning(
-                    f"Sheets API error {status} (attempt {attempt + 1}/{retries}), "
-                    f"retrying in {wait:.0f}s"
-                )
-                time.sleep(wait)
-            else:
-                raise
-    raise last_exc
+    Kept as a thin alias because this module calls it in many places. The
+    implementation is shared so the two copies that used to live here and in
+    cleanup_validation.py cannot drift apart again.
+    """
+    return sheets_call(fn, *args, **kwargs)
 
 
 def _set_bg(comp_ws, cell_ref: str, rgb: dict) -> None:

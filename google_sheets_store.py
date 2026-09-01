@@ -1,10 +1,86 @@
 import logging
+import time
 
 import pandas as pd
 
 import storage
 
 logger = logging.getLogger(__name__)
+
+# Retries and backoff for sheets_call(). Four attempts at 8s doubling covers
+# 8+16+32 = 56s of waiting, which clears a "write requests per minute" quota
+# window with room to spare.
+RETRIES = 4
+BACKOFF_SEC = 8.0
+
+# Worth retrying: a per-minute quota that will have refilled, and the transient
+# 5xx family. Anything else — 400, 403, 404 — means the request itself is wrong
+# and retrying only delays the error.
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+
+
+def sheets_call(fn, *args, retries: int = RETRIES,
+                backoff: float = BACKOFF_SEC, **kwargs):
+    """Call a gspread method, retrying quota and transient errors.
+
+    Every write in this module goes through here, so callers do not have to
+    remember to ask for it. That matters most for the quota case: Sheets allows
+    sixty write requests a minute, and a job that writes steadily will meet a
+    429 sooner or later however well it batches. Failing the whole run for a
+    limit that refills in under a minute is a poor trade.
+
+    Batching and retrying solve different halves of the same problem — batching
+    makes the limit unlikely to be reached, retrying survives it when something
+    else is writing the same sheet at the same time.
+    """
+    import requests.exceptions
+
+    last_exc = RuntimeError("no attempts made")
+    for attempt in range(retries):
+        try:
+            return fn(*args, **kwargs)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            reason = f"network error: {exc}"
+        except Exception as exc:
+            # Two clients reach Sheets here — gspread for values, and
+            # googleapiclient for the formatting batchUpdate — and they raise
+            # different exception types with the status in different places.
+            # Catching only one of them silently disables the retry for half
+            # the writes in this module.
+            status = _http_status(exc)
+            if status not in RETRYABLE_STATUS:
+                raise
+            last_exc = exc
+            reason = f"API error {status}"
+
+        wait = backoff * (2 ** attempt)
+        if attempt >= retries - 1:
+            break              # do not wait for a retry that will never happen
+        logger.warning(f"Sheets {reason} (attempt {attempt + 1}/{retries}), "
+                       f"retrying in {wait:.0f}s")
+        time.sleep(wait)
+    raise last_exc
+
+
+def _http_status(exc) -> int:
+    """The HTTP status behind a Sheets exception, or 0 if it is not one.
+
+    gspread.exceptions.APIError carries a requests Response on .response;
+    googleapiclient.errors.HttpError carries an httplib2 response on .resp,
+    where the status lives under .status. Read both without importing either,
+    so this stays honest whichever client raised.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    resp = getattr(exc, "resp", None)
+    status = getattr(resp, "status", None)
+    if isinstance(status, int):
+        return status
+    return 0
 
 # Columns that mean the same thing across different sheet layouts.
 _ALIAS_GROUPS = [
@@ -162,7 +238,7 @@ class GoogleSheetsStore:
         worksheet = self._worksheet
         values = worksheet.get_all_values()
         if not values or not any(c.strip() for c in values[0]):
-            worksheet.update("A1", [storage.OUTPUT_COLUMNS])
+            sheets_call(worksheet.update, "A1", [storage.OUTPUT_COLUMNS])
 
     # ── Generic read/write ──────────────────────────────────────────────────────
 
@@ -209,7 +285,7 @@ class GoogleSheetsStore:
         if header_name in header:
             return header.index(header_name) + 1
         new_col = len(header) + 1
-        worksheet.update_cell(1, new_col, header_name)
+        sheets_call(worksheet.update_cell, 1, new_col, header_name)
         return new_col
 
     def update_cell(
@@ -219,7 +295,7 @@ class GoogleSheetsStore:
         worksheet = (
             self.open_worksheet(worksheet_name) if worksheet_name else self._get_worksheet()
         )
-        worksheet.update_cell(row, col, value)
+        sheets_call(worksheet.update_cell, row, col, value)
 
     def write_column_values(
         self,
@@ -243,7 +319,7 @@ class GoogleSheetsStore:
         )
         end_row = start_row + len(values) - 1
         rng = f"{gspread.utils.rowcol_to_a1(start_row, col)}:{gspread.utils.rowcol_to_a1(end_row, col)}"
-        worksheet.update(rng, values, value_input_option="RAW")
+        sheets_call(worksheet.update, rng, values, value_input_option="RAW")
         logger.info(f"Wrote {len(values)} cells to column {col} ({rng})")
 
     def batch_format_cells(
@@ -293,10 +369,10 @@ class GoogleSheetsStore:
         for i in range(0, len(requests_list), CHUNK):
             chunk = requests_list[i: i + CHUNK]
             try:
-                sheets_api.spreadsheets().batchUpdate(
+                sheets_call(sheets_api.spreadsheets().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={"requests": chunk},
-                ).execute()
+                ).execute)
             except Exception as exc:
                 logger.warning(f"Failed to format cell batch {i}–{i + len(chunk)}: {exc}")
 
@@ -358,10 +434,10 @@ class GoogleSheetsStore:
         for i in range(0, len(requests), CHUNK):
             chunk = requests[i: i + CHUNK]
             try:
-                sheets_api.spreadsheets().batchUpdate(
+                sheets_call(sheets_api.spreadsheets().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={"requests": chunk},
-                ).execute()
+                ).execute)
             except Exception as exc:
                 logger.warning(f"Failed to format row batch {i}–{i + len(chunk)}: {exc}")
 
@@ -399,7 +475,7 @@ class GoogleSheetsStore:
             prepared.to_dict("records"), header, company_linkedin
         )
         # USER_ENTERED so the Company HYPERLINK formula renders as a clickable link.
-        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+        sheets_call(worksheet.append_rows, rows, value_input_option="USER_ENTERED")
         linked = sum(1 for r in rows if str(r[header.index("Company")]).startswith("=HYPERLINK")) if "Company" in header else 0
         logger.info(
             f"Appended {len(rows)} new rows to Google Sheets "

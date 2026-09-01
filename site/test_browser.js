@@ -269,6 +269,45 @@ function check(label, ok, detail) {
     check('the live sheet is read for the project you are in',
           mainValue === '3', 'got ' + JSON.stringify(mainValue));
 
+    console.log('\nthe switcher is legible in dark mode');
+    // The switcher shipped invisible: its CSS named tokens the page never
+    // defined, so the background rendered a light literal fallback while the
+    // text inherited the dark theme's near-white. Nothing errored; it was
+    // simply white on white. Only measuring real contrast catches that.
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    const contrast = await page.evaluate(() => {
+      const lum = (c) => {
+        const [r, g, b] = c.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number)
+          .map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92
+                                        : Math.pow((v + 0.055) / 1.055, 2.4); });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      // Walk up for the nearest painted background, as the browser does.
+      const painted = (el) => {
+        for (let n = el; n; n = n.parentElement) {
+          const bg = getComputedStyle(n).backgroundColor;
+          if (bg && !/rgba\(0, 0, 0, 0\)|transparent/.test(bg)) return bg;
+        }
+        return 'rgb(255,255,255)';
+      };
+      return [...document.querySelectorAll('#project-menu .menu-item')].map((el) => {
+        const a = lum(getComputedStyle(el).color), b = lum(painted(el));
+        const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+        return { text: el.textContent.trim().slice(0, 26), ratio: +ratio.toFixed(2) };
+      });
+    });
+    const worst = contrast.reduce((a, b) => (a.ratio < b.ratio ? a : b), contrast[0]);
+    // 4.5:1 is WCAG AA for body text. The bug measured about 1.1:1.
+    check('every menu item meets 4.5:1 against its background',
+          contrast.every((c) => c.ratio >= 4.5),
+          contrast.map((c) => `${c.text} ${c.ratio}:1`).join(' | '));
+    console.log(`       worst: "${worst.text}" at ${worst.ratio}:1`);
+    await page.keyboard.press('Escape');
+    await page.click('header h1');
+    await page.emulateMedia({ colorScheme: 'light' });
+
     console.log('\na remembered session survives a bad network');
     // Throwing a session away on any error would make one offline reload cost
     // every remembered project its full ten days.
