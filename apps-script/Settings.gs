@@ -505,6 +505,42 @@ function _ensureTemplateTabs(spreadsheet) {
   }
 }
 
+/**
+ * Move a newly created sheet into the configured projects folder.
+ *
+ * Returns the folder's name on success, '' when no folder is configured, and a
+ * message beginning "could not file" when it failed. It never throws: a sheet
+ * that exists in the wrong place is recoverable, one that failed to be created
+ * is not. But it does report, because the previous version logged the failure
+ * where nobody would ever read it and left the sheet in My Drive looking fine.
+ */
+function _fileIntoProjectsFolder(spreadsheetId) {
+  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+  if (!folderId) return '';
+  try {
+    var file = DriveApp.getFileById(spreadsheetId);
+    var folder = DriveApp.getFolderById(folderId);
+    folder.addFile(file);
+    // addFile ADDS a parent; without this the sheet stays in My Drive as well.
+    DriveApp.getRootFolder().removeFile(file);
+    return folder.getName();
+  } catch (err) {
+    return 'could not file it into PROJECTS_FOLDER_ID: ' + err;
+  }
+}
+
+/** The projects folder's name, or a reason it cannot be used. */
+function _projectsFolderStatus() {
+  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+  if (!folderId) return { configured: false };
+  try {
+    var folder = DriveApp.getFolderById(folderId);
+    return { configured: true, reachable: true, name: folder.getName() };
+  } catch (err) {
+    return { configured: true, reachable: false, error: String(err) };
+  }
+}
+
 function _createProject(body) {
   var name = String(body.name || '').trim();
   if (!name) throw new Error('a project name is required');
@@ -523,6 +559,7 @@ function _createProject(body) {
   var spreadsheetId = String(body.spreadsheetId || '').trim();
   var created = false;
   var url = '';
+  var filedIn = '';
 
   if (spreadsheetId) {
     // ADOPTION IS PRIVILEGED, creation is not.
@@ -562,16 +599,28 @@ function _createProject(body) {
     created = true;
     _ensureTemplateTabs(fresh);
 
-    var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
-    if (folderId) {
-      try {
-        var file = DriveApp.getFileById(spreadsheetId);
-        DriveApp.getFolderById(folderId).addFile(file);
-        DriveApp.getRootFolder().removeFile(file);
-      } catch (err) {
-        // A bad folder id must not lose a sheet that was created successfully.
-        Logger.log('could not file the new sheet: ' + err);
-      }
+    filedIn = _fileIntoProjectsFolder(spreadsheetId);
+  }
+
+  // Whoever created the project gets THIS sheet, and only this sheet.
+  //
+  // Deliberately per-file rather than by putting them in the projects folder:
+  // a file inherits its folder's sharing, so a folder shared with everyone who
+  // creates projects would let each of them open and edit every other project's
+  // spreadsheet — straight past the password that is supposed to separate them.
+  // Keep the folder to yourself; grant the sheet.
+  var grantedTo = '';
+  var ownerEmail = String(body.ownerEmail || '').trim();
+  if (ownerEmail) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ownerEmail)) {
+      throw new Error('that does not look like an email address: ' + ownerEmail);
+    }
+    try {
+      DriveApp.getFileById(spreadsheetId).addEditor(ownerEmail);
+      grantedTo = ownerEmail;
+    } catch (err) {
+      // The project is usable without this; say so rather than failing it.
+      grantedTo = 'could not share it with ' + ownerEmail + ': ' + err;
     }
   }
 
@@ -617,7 +666,12 @@ function _createProject(body) {
 
   return {
     project: projectId, name: name, spreadsheetId: spreadsheetId,
-    url: url, createdSheet: created, sharedWith: shared
+    url: url, createdSheet: created, sharedWith: shared,
+    grantedTo: grantedTo,
+    // '' when no folder is configured, the folder's name when it was filed,
+    // and a 'could not file…' string when it was not — so a misconfigured
+    // folder is visible rather than silently leaving sheets in My Drive.
+    filedIn: filedIn
   };
 }
 
@@ -673,6 +727,7 @@ function doGet(e) {
         activeProjects: count,
         serviceAccountConfigured: Boolean(_serviceAccount()),
         adminPasswordConfigured: Boolean(_adminPassword()),
+        projectsFolder: _projectsFolderStatus(),
         // Diagnostic only, and it needs the userinfo.email scope, which is not
         // granted by default — so it must never be allowed to fail the ping.
         runsAs: _effectiveUser(),

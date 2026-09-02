@@ -343,3 +343,7 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 /* The gate is toggled with [hidden]; its flex layout must not win over that.
    An unlocked overlay that still catches clicks swallows the whole page. */
 [hidden] { display: none !important; }
+
+#new-project .opt { font-weight: 400; color: var(--text-faint); }
+#np-done a { color: inherit; font-weight: 600; }
+#np-done .hint { margin-top: 6px; opacity: .85; }

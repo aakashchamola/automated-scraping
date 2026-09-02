@@ -465,7 +465,8 @@ $('btn-lock').addEventListener('click', async () => {
 
 function openNewProject() {
   const dlg = $('new-project');
-  ['np-name', 'np-pw', 'np-sheet', 'np-admin'].forEach((id) => { $(id).value = ''; });
+  ['np-name', 'np-pw', 'np-sheet', 'np-admin', 'np-email']
+    .forEach((id) => { $(id).value = ''; });
   $('np-err').textContent = '';
   $('np-done').hidden = true;
   $('np-go').disabled = false;
@@ -481,6 +482,7 @@ async function createProject() {
   const name = $('np-name').value.trim();
   const password = $('np-pw').value;
   const spreadsheetId = $('np-sheet').value.trim();
+  const ownerEmail = $('np-email').value.trim();
   const adminPassword = $('np-admin').value;
   const err = $('np-err');
   err.textContent = '';
@@ -519,7 +521,7 @@ async function createProject() {
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'createProject', token: SESSION_TOKEN,
-        name, password, spreadsheetId, adminPassword,
+        name, password, spreadsheetId, adminPassword, ownerEmail,
       }),
     });
 
@@ -545,11 +547,31 @@ async function createProject() {
     // Deliberately not remembered as a session yet: there is nothing published
     // to derive a key from until the first run, so a stored session would be
     // an entry that cannot open anything.
-    $('np-done').hidden = false;
-    $('np-done').textContent =
-      `Created "${auth.name || name}" — the spreadsheet is in your Drive and the ` +
-      'service account can already reach it. Run the pipeline for this project, ' +
-      'then unlock it here with its password.';
+    // The sheet id comes back through the sign-in, not the create: a no-cors
+    // POST's own answer cannot be read (see the Settings section).
+    let sheetUrl = '';
+    try {
+      const info = await jsonp(
+        `${SETTINGS_URL}?action=project&token=${encodeURIComponent(auth.token)}`);
+      if (info.ok && info.spreadsheetId) {
+        sheetUrl = `https://docs.google.com/spreadsheets/d/${info.spreadsheetId}`;
+      }
+    } catch { /* the link is a convenience, not the result */ }
+
+    const done = $('np-done');
+    done.hidden = false;
+    done.textContent = `Created "${auth.name || name}". `;
+    if (sheetUrl) {
+      const link = el('a', '', 'Open its Google Sheet');
+      link.href = sheetUrl;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      done.append(link);
+      done.append(document.createTextNode(
+        ownerEmail ? ` — shared with ${ownerEmail}.` : '.'));
+    }
+    done.append(el('div', 'hint',
+      'Run the pipeline for this project, then unlock it here with its password.'));
     go.textContent = 'Created';
   } catch (ex) {
     err.textContent = `Could not create the project: ${ex.message}`;

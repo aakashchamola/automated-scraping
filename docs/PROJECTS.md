@@ -82,6 +82,23 @@ no PBKDF2 and the same hash has to be computable there. That is weaker against
 offline cracking, and acceptable only because the hash lives in a private
 spreadsheet whose reader can already read every project's data directly.
 
+## Where the sheets live, and who can see them
+
+Set `PROJECTS_FOLDER_ID` in Script Properties and every sheet created here is
+moved into that Drive folder. `?ping=1` reports whether the folder is reachable,
+and a create call reports which folder the sheet was filed into — a bad id used
+to be logged where nobody would read it, leaving sheets loose in My Drive.
+
+**Keep that folder to yourself.** A file inherits the sharing of the folder it
+sits in, so a projects folder shared with everyone who creates projects would
+let each of them open and edit every other project's spreadsheet — straight past
+the password that is supposed to separate them.
+
+Grant access per sheet instead. The new-project form takes the creator's Google
+address and shares that one spreadsheet with them, so they can open it in Google
+Sheets and see nothing else. It is optional; without it the sheet is reachable
+only by you and the service account.
+
 ## Who may create projects
 
 By default, anyone signed in to any project. Once you hand a project password to

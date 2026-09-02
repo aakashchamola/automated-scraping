@@ -115,10 +115,16 @@ function buildSandbox(world) {
       },
     },
     DriveApp: {
-      getFileById: id => ({ addEditor(email) { (world.editors[id] = world.editors[id] || []).push(email); } }),
+      getFileById: id => ({
+        addEditor(email) { (world.editors[id] = world.editors[id] || []).push(email); },
+        getId() { return id; },
+      }),
       getFolderById(id) {
-        if (!world.folders.includes(id)) throw new Error('no such folder');
-        return { addFile(f) { world.filed.push(id); } };
+        if (!world.folders.includes(id)) throw new Error('no such folder: ' + id);
+        return {
+          addFile(f) { world.filed.push([id, f.getId ? f.getId() : String(f)]); },
+          getName() { return 'Projects (' + id + ')'; },
+        };
       },
       getRootFolder: () => ({ removeFile() {} }),
     },
@@ -314,6 +320,67 @@ console.log('\nSettings.gs\n');
   const allowed = post(s, { action: 'createProject', adminPassword: 'admin-only-pw',
                             name: 'Zeta', password: 'zeta-secret-1' });
   check('and the admin password is', allowed.ok === true);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nfiling new sheets into a projects folder');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+
+  const loose = post(s, { action: 'createProject', token: auth.token,
+                          name: 'Unfiled', password: 'unfiled-secret-1' });
+  check('with no folder configured a sheet is still created',
+        loose.ok === true && loose.filedIn === '', JSON.stringify(loose.filedIn));
+
+  world.props.PROJECTS_FOLDER_ID = 'folder-1';
+  const filed = post(s, { action: 'createProject', token: auth.token,
+                          name: 'Filed', password: 'filed-secret-1' });
+  check('with a folder configured the sheet is moved into it',
+        filed.ok === true && /^Projects \(folder-1\)$/.test(filed.filedIn), filed.filedIn);
+  check('and it is the new sheet that was filed',
+        world.filed.some(([f, id]) => f === 'folder-1' && id === filed.spreadsheetId),
+        JSON.stringify(world.filed));
+
+  world.props.PROJECTS_FOLDER_ID = 'no-such-folder';
+  const broken = post(s, { action: 'createProject', token: auth.token,
+                           name: 'Broken', password: 'broken-secret-1' });
+  // Silently leaving it in My Drive is how a misconfigured folder goes unnoticed.
+  check('a bad folder id is reported, not swallowed',
+        broken.ok === true && /could not file/.test(broken.filedIn), broken.filedIn);
+  const ping = get(s, { ping: '1' });
+  check('and the ping says the folder is unreachable',
+        ping.projectsFolder.configured === true && ping.projectsFolder.reachable === false,
+        JSON.stringify(ping.projectsFolder));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe creator gets their own sheet, and only theirs');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+
+  const made = post(s, { action: 'createProject', token: auth.token, name: 'Theirs',
+                         password: 'theirs-secret-1', ownerEmail: 'client@example.com' });
+  check('the creator is granted editor on their sheet',
+        (world.editors[made.spreadsheetId] || []).includes('client@example.com'),
+        JSON.stringify(world.editors[made.spreadsheetId]));
+  check('and it is reported back', made.grantedTo === 'client@example.com', made.grantedTo);
+
+  // The whole point: a per-file grant, never a shared folder that every
+  // creator can read, which would defeat the password separating projects.
+  const others = Object.keys(world.editors)
+    .filter(id => id !== made.spreadsheetId)
+    .filter(id => (world.editors[id] || []).includes('client@example.com'));
+  check('they are granted nothing on any other project', others.length === 0,
+        JSON.stringify(others));
+
+  const anon = post(s, { action: 'createProject', token: auth.token, name: 'NoEmail',
+                         password: 'noemail-secret-1' });
+  check('the email is optional', anon.ok === true && anon.grantedTo === '');
+
+  const bad = post(s, { action: 'createProject', token: auth.token, name: 'BadEmail',
+                        password: 'bademail-secret-1', ownerEmail: 'not-an-email' });
+  check('a malformed address is refused rather than silently skipped',
+        bad.ok === false && /email address/.test(bad.error), bad.error);
 }
 
 {
