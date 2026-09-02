@@ -65,6 +65,26 @@ class FakeSpreadsheet {
 }
 
 function buildSandbox(world) {
+  // Folders record what is added and removed, so a move can be asserted rather
+  // than assumed. A folder listed in world.readonlyParents refuses removeFile,
+  // which is what Drive does when the file lives in someone else's Drive.
+  const makeFolder = (id) => ({
+    getId: () => id,
+    getName: () => (id === 'root' ? 'My Drive' : 'Projects (' + id + ')'),
+    addFile(f) {
+      const fid = f.getId();
+      world.filed.push([id, fid]);
+      world.parents[fid] = [...new Set([...(world.parents[fid] || []), id])];
+    },
+    removeFile(f) {
+      if (world.readonlyParents.includes(id)) {
+        throw new Error("cannot remove from another owner's Drive");
+      }
+      const fid = f.getId();
+      world.parents[fid] = (world.parents[fid] || []).filter(p => p !== id);
+    },
+  });
+
   const Utilities = {
     DigestAlgorithm: { SHA_256: 'sha256' },
     Charset: { UTF_8: 'utf8' },
@@ -118,15 +138,17 @@ function buildSandbox(world) {
       getFileById: id => ({
         addEditor(email) { (world.editors[id] = world.editors[id] || []).push(email); },
         getId() { return id; },
+        getParents() {
+          const list = (world.parents[id] || []).map(pid => makeFolder(pid));
+          let i = 0;
+          return { hasNext: () => i < list.length, next: () => list[i++] };
+        },
       }),
-      getFolderById(id) {
+      getFolderById: id => {
         if (!world.folders.includes(id)) throw new Error('no such folder: ' + id);
-        return {
-          addFile(f) { world.filed.push([id, f.getId ? f.getId() : String(f)]); },
-          getName() { return 'Projects (' + id + ')'; },
-        };
+        return makeFolder(id);
       },
-      getRootFolder: () => ({ removeFile() {} }),
+      getRootFolder: () => makeFolder('root'),
     },
     ContentService: {
       MimeType: { JAVASCRIPT: 'js', JSON: 'json' },
@@ -145,7 +167,8 @@ const CONTROL_HEADER = ['id', 'name', 'spreadsheet_id', 'status', 'data_key',
 
 function makeWorld() {
   const world = { props: {}, sheets: {}, editors: {}, folders: ['folder-1'],
-                  filed: [], names: {}, created: 0 };
+                  filed: [], names: {}, created: 0,
+                  parents: {}, readonlyParents: [] };
 
   const project = (id, jobs) => new FakeSpreadsheet(id, [
     new FakeSheet('Settings', [
@@ -351,6 +374,50 @@ console.log('\nSettings.gs\n');
   check('and the ping says the folder is unreachable',
         ping.projectsFolder.configured === true && ping.projectsFolder.reachable === false,
         JSON.stringify(ping.projectsFolder));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ntidying what already exists into the folder');
+  world.props.PROJECTS_FOLDER_ID = 'folder-1';
+  world.parents['ctrl'] = ['root'];
+  world.parents['sheet-a'] = ['root'];
+  world.parents['sheet-b'] = ['someone-elses-drive'];
+  world.folders.push('someone-elses-drive');
+  world.readonlyParents.push('someone-elses-drive');
+
+  const denied = post(s, { action: 'organiseFiles' });
+  check('it cannot be run without authorisation', denied.ok === false);
+
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const out = post(s, { action: 'organiseFiles', token: auth.token });
+  check('it reports the folder it filed into', out.ok === true && /folder-1/.test(out.folder),
+        JSON.stringify(out));
+  check('the control sheet moves', /control sheet: moved/.test(out.results.join('|')),
+        out.results.join(' | '));
+  check('and it really left My Drive', !(world.parents['ctrl'] || []).includes('root'),
+        JSON.stringify(world.parents['ctrl']));
+  check('a sheet you own moves', /project 'alpha': moved/.test(out.results.join('|')),
+        out.results.join(' | '));
+
+  // A client's spreadsheet cannot be taken out of their Drive. Saying "moved"
+  // would be a lie, and failing the whole run for it would be unhelpful.
+  const stuck = out.results.find(r => /project 'beta'/.test(r));
+  check("someone else's sheet is reported honestly, not claimed as moved",
+        /stays in its owner's Drive/.test(stuck || ''), stuck);
+  check('but it is reachable from the folder anyway',
+        (world.parents['sheet-b'] || []).includes('folder-1'),
+        JSON.stringify(world.parents['sheet-b']));
+
+  const again = post(s, { action: 'organiseFiles', token: auth.token });
+  check('running it twice is safe',
+        again.results.filter(r => /already there/.test(r)).length >= 2,
+        again.results.join(' | '));
+
+  delete world.props.PROJECTS_FOLDER_ID;
+  const unset = post(s, { action: 'organiseFiles', token: auth.token });
+  check('with no folder configured it says so',
+        unset.ok === false && /PROJECTS_FOLDER_ID/.test(unset.error), unset.error);
 }
 
 {

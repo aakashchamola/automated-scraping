@@ -541,6 +541,80 @@ function _projectsFolderStatus() {
   }
 }
 
+/**
+ * Move one file into *folder*, detaching it from wherever it was.
+ *
+ * addFile ADDS a parent rather than moving, so the old one has to be removed or
+ * the file shows up in both places. Parents are collected before the add, or
+ * the new folder would be in the list and promptly removed again.
+ *
+ * A parent that belongs to somebody else cannot be detached — Drive does not
+ * let an editor move a file out of the owner's Drive — so that is caught and
+ * reported rather than thrown. The file ends up reachable from the folder
+ * either way, which is what was wanted.
+ */
+function _moveIntoFolder(fileId, folder) {
+  var file = DriveApp.getFileById(fileId);
+  var previous = [];
+  var parents = file.getParents();
+  while (parents.hasNext()) previous.push(parents.next());
+
+  var already = previous.some(function (p) { return p.getId() === folder.getId(); });
+  if (already) return { moved: false, already: true };
+
+  folder.addFile(file);
+  var detached = 0, stuck = 0;
+  previous.forEach(function (parent) {
+    try {
+      parent.removeFile(file);
+      detached++;
+    } catch (err) {
+      stuck++;          // someone else's Drive; the file is in both places now
+    }
+  });
+  return { moved: true, detached: detached, stuck: stuck };
+}
+
+/**
+ * Put the control sheet and every project sheet into PROJECTS_FOLDER_ID.
+ *
+ * For tidying up what already exists — new sheets are filed as they are
+ * created. Reports every file individually: a sheet owned by someone else
+ * usually cannot be moved, and that is worth saying plainly rather than
+ * failing the whole run or pretending it worked.
+ */
+function _organiseFiles() {
+  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+  if (!folderId) throw new Error('PROJECTS_FOLDER_ID is not set');
+  var folder = DriveApp.getFolderById(folderId);
+
+  var targets = [{ label: 'control sheet', id: _controlId() }];
+  _projects().forEach(function (p) {
+    if (p.spreadsheet_id) {
+      targets.push({ label: "project '" + p.id + "'", id: p.spreadsheet_id });
+    }
+  });
+
+  var results = [];
+  targets.forEach(function (target) {
+    if (!target.id) return;
+    try {
+      var outcome = _moveIntoFolder(target.id, folder);
+      if (outcome.already) {
+        results.push(target.label + ': already there');
+      } else if (outcome.stuck) {
+        results.push(target.label + ': added to the folder, but it stays in its ' +
+                     "owner's Drive too — it is not yours to move");
+      } else {
+        results.push(target.label + ': moved');
+      }
+    } catch (err) {
+      results.push(target.label + ': could not be moved — ' + err);
+    }
+  });
+  return { folder: folder.getName(), results: results };
+}
+
 function _createProject(body) {
   var name = String(body.name || '').trim();
   if (!name) throw new Error('a project name is required');
@@ -790,6 +864,14 @@ function doPost(e) {
   var result;
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
+    if (body.action === 'organiseFiles') {
+      // Admin-gated: this rearranges the owner's Drive, not a project's data.
+      var mayOrganise = _authoriseAdmin(body);
+      return _json(mayOrganise.ok
+        ? (function () { var r = _organiseFiles(); r.ok = true; return r; })()
+        : mayOrganise);
+    }
 
     if (body.action === 'createProject') {
       var allowed = _authoriseAdmin(body);
