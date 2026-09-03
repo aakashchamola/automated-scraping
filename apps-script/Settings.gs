@@ -116,10 +116,25 @@ function _serviceAccount() {
   return _props().getProperty('SERVICE_ACCOUNT') || '';
 }
 
+/**
+ * Which account this deployment runs as, masked.
+ *
+ * Enough to tell two accounts apart — which is what it is for; a script
+ * deployed under the wrong account is a confusing failure, because it can
+ * publish a project's data perfectly while being unable to open its
+ * spreadsheet. But ?ping=1 needs no password, so the full address would be
+ * handed to anyone with the URL, and it is the owner's own address.
+ */
 function _effectiveUser() {
   try {
-    return Session.getEffectiveUser().getEmail();
+    var email = Session.getEffectiveUser().getEmail();
+    if (!email) return '';
+    var at = email.indexOf('@');
+    if (at < 2) return '***' + email.substring(at);
+    return email.charAt(0) + '***' + email.charAt(at - 1) + email.substring(at);
   } catch (err) {
+    // Needs the userinfo.email scope, which is not granted by default, so it
+    // must never be allowed to fail the ping.
     return '';
   }
 }
@@ -710,13 +725,33 @@ function _fileIntoProjectsFolder(spreadsheetId) {
   }
 }
 
-/** The projects folder's name, or a reason it cannot be used. */
+/**
+ * The projects folder: its name, whether this deployment can reach it, and how
+ * many people it is shared with.
+ *
+ * The count is there because it is the folder every project sheet is filed
+ * into, and a file inherits its folder's sharing — so it says, in one number,
+ * how many people can open all of them. That is deliberate here: the folder is
+ * the shared team workspace, and the passwords separate projects in the app,
+ * not in Drive. It is reported so a wrong folder id is visible, and because a
+ * jump in the number is worth noticing.
+ *
+ * A count, never the addresses: this goes into the unauthenticated ping.
+ */
 function _projectsFolderStatus() {
   var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
   if (!folderId) return { configured: false };
   try {
     var folder = DriveApp.getFolderById(folderId);
-    return { configured: true, reachable: true, name: folder.getName() };
+    var status = { configured: true, reachable: true, name: folder.getName() };
+    try {
+      status.sharedWith =
+        folder.getEditors().length + folder.getViewers().length;
+    } catch (err) {
+      // Listing who has a folder needs more than opening it.
+      status.sharedWith = null;
+    }
+    return status;
   } catch (err) {
     return { configured: true, reachable: false, error: String(err) };
   }
@@ -1112,13 +1147,11 @@ function _createProject(body) {
     filedIn = _fileIntoProjectsFolder(spreadsheetId);
   }
 
-  // Whoever created the project gets THIS sheet, and only this sheet.
+  // Whoever created the project gets a direct grant on its sheet.
   //
-  // Deliberately per-file rather than by putting them in the projects folder:
-  // a file inherits its folder's sharing, so a folder shared with everyone who
-  // creates projects would let each of them open and edit every other project's
-  // spreadsheet — straight past the password that is supposed to separate them.
-  // Keep the folder to yourself; grant the sheet.
+  // Named per-file rather than relying on the projects folder, so the sheet
+  // lands in their "Shared with me" and the response can hand back a link they
+  // can actually open — a folder grant alone leaves them hunting for it.
   var grantedTo = '';
   var ownerEmail = String(body.ownerEmail || '').trim();
   if (ownerEmail) {

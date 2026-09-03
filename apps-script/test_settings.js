@@ -73,6 +73,8 @@ function buildSandbox(world) {
   const makeFolder = (id) => ({
     getId: () => id,
     getName: () => (id === 'root' ? 'My Drive' : 'Projects (' + id + ')'),
+    getEditors: () => (world.folderEditors[id] || []).map(e => ({ getEmail: () => e })),
+    getViewers: () => (world.folderViewers[id] || []).map(e => ({ getEmail: () => e })),
     addFile(f) {
       const fid = f.getId();
       world.filed.push([id, fid]);
@@ -200,7 +202,8 @@ function makeWorld() {
   const world = { props: {}, sheets: {}, editors: {}, folders: ['folder-1'],
                   filed: [], names: {}, created: 0,
                   parents: {}, readonlyParents: [],
-                  viewers: {}, trashed: {}, untrashable: [] };
+                  viewers: {}, trashed: {}, untrashable: [],
+                  folderEditors: {}, folderViewers: {} };
 
   const project = (id, jobs) => new FakeSpreadsheet(id, [
     new FakeSheet('Settings', [
@@ -450,6 +453,52 @@ console.log('\nSettings.gs\n');
   const unset = post(s, { action: 'organiseFiles', token: auth.token });
   check('with no folder configured it says so',
         unset.ok === false && /PROJECTS_FOLDER_ID/.test(unset.error), unset.error);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe ping reports the projects folder without leaking addresses');
+  world.props.PROJECTS_FOLDER_ID = 'folder-1';
+
+  const priv = get(s, { ping: '1' });
+  check('a folder shared with nobody counts zero',
+        priv.projectsFolder.sharedWith === 0, JSON.stringify(priv.projectsFolder));
+  check('and is named, so a wrong folder id is visible',
+        priv.projectsFolder.name === 'Projects (folder-1)' &&
+        priv.projectsFolder.reachable === true,
+        JSON.stringify(priv.projectsFolder));
+
+  // The team folder: shared on purpose, so every sheet in it is shared too.
+  // Reported as a count, because a jump in it is worth noticing.
+  world.folderEditors['folder-1'] = ['one@example.com', 'two@example.com'];
+  world.folderViewers['folder-1'] = ['three@example.com'];
+  const shared = get(s, { ping: '1' });
+  check('viewers and editors are both counted',
+        shared.projectsFolder.sharedWith === 3,
+        String(shared.projectsFolder.sharedWith));
+  // The ping needs no password, so it must not hand out addresses.
+  check('but never the folder\'s addresses',
+        !JSON.stringify(shared.projectsFolder).includes('@'),
+        JSON.stringify(shared.projectsFolder));
+  check('and the owner\'s own address is masked',
+        shared.runsAs === 'o***r@example.com', shared.runsAs);
+
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const made = post(s, { action: 'createProject', token: auth.token, name: 'Filed',
+                         password: 'exposed-secret-1' });
+  check('filing a new sheet there just names the folder',
+        made.filedIn === 'Projects (folder-1)', made.filedIn);
+  check('and the project is created', made.ok === true);
+
+  const unreachable = makeWorld(); const s2 = buildSandbox(unreachable);
+  seedProjects(s2, unreachable);
+  unreachable.props.PROJECTS_FOLDER_ID = 'no-such-folder';
+  const broken = get(s2, { ping: '1' });
+  check('an unreachable folder is reported, not silently ignored',
+        broken.projectsFolder.configured === true &&
+        broken.projectsFolder.reachable === false &&
+        Boolean(broken.projectsFolder.error),
+        JSON.stringify(broken.projectsFolder));
 }
 
 {
