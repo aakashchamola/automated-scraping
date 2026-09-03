@@ -111,7 +111,16 @@ One more thing, and it is just a password.
     export SETTINGS_WEB_APP_URL='<the /exec URL from whoever runs the project>'
     export PROJECT_PASSWORD='<your project password>'
 
-  Then run whichever part you want:
+  Then leave the agent running:
+
+    ./.venv/bin/python agent.py
+
+  That is what connects the Run buttons on the dashboard to this machine. The
+  Runs tab will say your machine is listening; press Run there and the work
+  happens here. It only makes outgoing requests, so it needs no open port and
+  no fixed address, and queued runs wait if you close the laptop.
+
+  Or run one part on its own, no agent needed:
 
     ./.venv/bin/python main.py --config config.yaml               # scrape
     ./.venv/bin/python job_validator.py --config config.yaml      # check links

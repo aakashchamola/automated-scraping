@@ -1,22 +1,37 @@
-# Runs the scraping pipeline on a schedule, on GitHub's free runners, so the
-# sheet keeps filling without anyone's laptop being on.
+# Publishes the dashboard, and can run the pipeline here as a fallback.
 #
-# ONE-TIME SETUP — add the Google service-account key as a repository secret:
+# THE AUTOMATION NO LONGER NEEDS THIS. Runs happen on whichever machine has
+# agent.py going, started from the dashboard's Run buttons, and the weekly
+# cadence is a time-driven trigger in apps-script/Settings.gs — both queued
+# through the project's own sheet. The cron that used to live here was removed
+# when that landed, or every scheduled run would happen twice.
+#
+# What is left:
+#   publish  deploys the static page to GitHub Pages on push. No secrets, no
+#            Python, no data — the dashboard reads the sheet through the Web
+#            App now, so there is nothing to export.
+#   run      the old pipeline, on demand only. Kept because it is the one path
+#            that works when no machine is available, and because it is the
+#            owner's fallback if the agent is not running. It needs the
+#            service-account key; nothing else here does.
+#
+# ONE-TIME SETUP for `run` — add the Google service-account key as a secret:
 #   gh secret set GOOGLE_SERVICE_ACCOUNT < secrets/google-service-account.json
-# (Settings → Secrets and variables → Actions does the same thing.)
 #
 # Why some platforms are dropped below: measured from a runner on 2026-08-29
 # (probe-datacenter-ip.yml). From a datacenter IP, LinkedIn's guest API and the
 # Greenhouse/Workday ATS APIs answer normally, but Indeed returns a Cloudflare
 # 403 and Internshala serves a challenge page with a 200 status. Leaving them
 # enabled would spend the whole run collecting nothing and log misleading
-# "0 jobs found" lines, so CI runs without them. Nothing is changed for local
-# runs, where both still work.
-name: Scheduled scrape
+# "0 jobs found" lines, so CI runs without them. Nothing is changed for a local
+# run, where both still work — which is the better reason to run it there.
+name: Publish the dashboard
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'        # Mondays 06:00 UTC
+  push:
+    paths:
+      - 'site/**'
+      - '.github/workflows/scheduled-pipeline.yml'
   workflow_dispatch:
     inputs:
       project:
@@ -53,6 +68,10 @@ permissions:
 
 jobs:
   run:
+    # Dispatch only. Pressing Run on the dashboard queues the work for the
+    # machine running agent.py instead; this is the fallback for when there
+    # isn't one.
+    if: github.event_name == 'workflow_dispatch' && inputs.steps != ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -201,58 +220,41 @@ jobs:
   # job; the only thing that reaches Pages is ciphertext, so a public URL never
   # exposes the sheet or the key.
   publish:
-    needs: run
-    if: always() && needs.run.result != 'cancelled' && needs.run.result != 'failure'
+    # `needs: run` for ORDER only, never as a requirement — hence always() and
+    # the explicit 'skipped'. It used to be a hard dependency, so the page was
+    # redeployed only after a pipeline run. That was fine while a cron
+    # guaranteed one every week; now that runs happen on somebody's machine, a
+    # change to the dashboard would never have reached anyone.
+    needs: [run]
+    if: always() && (needs.run.result == 'success' || needs.run.result == 'skipped')
     runs-on: ubuntu-latest
-    env:
-      # Publishing walks every project; without this it would name them all in
-      # a log any signed-in GitHub user can read.
-      LOG_CONSOLE_LEVEL: warning
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - run: pip install -q -r requirements.txt
-
-      - name: Restore the service-account key
-        env:
-          KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-        run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::GOOGLE_SERVICE_ACCOUNT is not set"; exit 1
-          fi
-          mkdir -p secrets && printf '%s' "$KEY" > secrets/google-service-account.json
-
-      - name: Export and encrypt every project
-        # Each project is encrypted under its own data key, taken from the
-        # control sheet. There are no per-project repository secrets, which is
-        # what lets a new project be published without touching this file.
-        run: python -u publish_projects.py --config config.yaml --out site/data
+      # No Python, no service-account key, and no data export. The dashboard
+      # reads each tab from the Web App as it is opened, so there is nothing to
+      # snapshot — which also means this job handles no secret but the /exec URL
+      # that is baked into a world-readable config.js anyway.
 
       - name: Refuse to publish cleartext
-        # Cheap insurance: if the encrypt step ever changes shape, this stops a
-        # readable copy of a sheet reaching a public URL.
+        # A snapshot is no longer exported, but old ones may still be committed,
+        # and a readable copy of a sheet must never reach a public URL.
         #
         # It reports COUNTS, never paths: a directory under site/data is named
         # for its project, and this log is readable by any signed-in GitHub user
-        # while the repository is public. Listing them here would publish the
-        # project names that the design takes care never to disclose.
+        # while the repository is public. Listing them would publish the project
+        # names the design takes care never to disclose.
         run: |
-          if find site/data -name '*.json' ! -name '*.enc.json' | grep -q .; then
+          if [ -d site/data ] && find site/data -name '*.json' ! -name '*.enc.json' | grep -q .; then
             echo "::error::cleartext JSON found under site/data — refusing to publish"
             find site/data -name '*.json' ! -name '*.enc.json' -printf '%f\n' | sort -u
             exit 1
           fi
-          projects=$(find site/data -mindepth 1 -maxdepth 1 -type d | wc -l)
-          files=$(find site/data -name '*.enc.json' | wc -l)
-          echo "published $projects project(s), $files encrypted files, all ciphertext"
+          files=$([ -d site/data ] && find site/data -name '*.enc.json' | wc -l || echo 0)
+          echo "$files encrypted snapshot file(s) carried over, all ciphertext"
 
       - name: Stamp the build
         run: |
@@ -271,9 +273,6 @@ jobs:
           if [ -z "${{ secrets.SETTINGS_WEB_APP_URL }}" ]; then
             echo "::notice::SETTINGS_WEB_APP_URL is not set — Settings and Keywords will be read-only and projects cannot be created."
           fi
-
-      - name: Remove the key before anything is uploaded
-        run: rm -f secrets/google-service-account.json
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

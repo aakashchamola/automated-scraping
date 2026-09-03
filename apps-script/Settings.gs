@@ -69,6 +69,16 @@
  *      Advanced -> Go to <name> (unsafe). It is your own script.
  *   6. Check it: open <the /exec URL>?ping=1 in a browser.
  *   7. gh secret set SETTINGS_WEB_APP_URL   (paste the /exec URL)
+ *
+ * ── RUNS HAPPEN ON SOMEBODY'S MACHINE ──────────────────────────────────────
+ * This script does not scrape anything. It holds a queue: the dashboard asks
+ * for a run, and agent.py — running on whichever computer should do the work —
+ * claims it and reports back. Neither end can call the other, so both poll
+ * this. See "The run queue" below.
+ *
+ * For a run on a timer, add ONE time-driven trigger on scheduledRun (Triggers
+ * -> Add trigger -> Time-driven). Projects opt in through their own Settings
+ * tab, so that single trigger serves all of them.
  */
 
 var CONTROL_TAB = 'Projects';
@@ -805,6 +815,75 @@ function _deleteRows(project, body) {
     try { sheet.deleteRow(n); deleted++; } catch (err) { /* reported by count */ }
   });
   return { worksheet: sheet.getName(), deleted: deleted, requested: wanted.length };
+}
+
+
+/* ── The schedule ───────────────────────────────────────────────────────────
+   What replaced the weekly cron in the CI workflow.
+
+   It belongs here rather than on the machine that does the work, because that
+   machine is a laptop: a cron job on it fires only if it happens to be awake
+   at the time, and silently does not if it is not. Queued from here, the run
+   waits until the machine is next listening and then happens — late, but it
+   happens, and the queue says plainly that it was waiting.
+
+   ── SET IT UP ONCE ────────────────────────────────────────────────────────
+   In the Apps Script editor: Triggers (the clock) -> Add trigger
+     Function:    scheduledRun
+     Event source: Time-driven
+     Type:        Week timer -> whichever day and hour you want
+
+   Each project opts in through its own Settings tab, so one trigger serves
+   every project and a new one needs no change here:
+
+     schedule.enabled   true / false      (absent means off)
+     schedule.mode      full, scrape-only, validate-only, …   (absent: full)   */
+
+function _scheduleFor(project) {
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var settings = spreadsheet.getSheetByName(SHEET_NAME);
+  var rows = settings ? settings.getDataRange().getValues() : [];
+  var enabled = String(_settingValue(rows, 'schedule.enabled', 'false'))
+    .trim().toLowerCase();
+  return {
+    enabled: enabled === 'true' || enabled === 'yes' || enabled === '1',
+    mode: _settingValue(rows, 'schedule.mode', 'full')
+  };
+}
+
+/**
+ * Queue the scheduled run for every project that asked for one.
+ *
+ * Called by a time-driven trigger, so nothing is signed in and there is no
+ * request to answer — a failure here would be invisible. Each project is
+ * therefore wrapped on its own: one project with a broken Settings tab must
+ * not stop the rest from being queued, and what happened is written to the log
+ * where the Executions page will show it.
+ */
+function scheduledRun() {
+  var results = [];
+  _activeProjects().forEach(function (project) {
+    try {
+      var schedule = _scheduleFor(project);
+      if (!schedule.enabled) {
+        results.push(project.id + ': not scheduled');
+        return;
+      }
+      // Through the same path the dashboard uses, so a scheduled run is
+      // identical to one someone pressed — including the refusal to queue a
+      // mode twice while it is still waiting.
+      var outcome = _requestRun(project, { mode: schedule.mode,
+                                           requestedBy: 'schedule' });
+      results.push(project.id + ': ' + (outcome.queued
+        ? 'queued ' + schedule.mode
+        : 'skipped, ' + (outcome.message || 'already waiting')));
+    } catch (err) {
+      results.push(project.id + ': FAILED — ' + err);
+    }
+  });
+  var summary = results.join('\n');
+  Logger.log(summary);
+  return summary;
 }
 
 

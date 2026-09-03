@@ -90,6 +90,80 @@ datacenter address fine, but Indeed and Internshala return a Cloudflare 403 and
 a challenge page. A home connection gets both back, which is why CI drops them
 and a local run does not.
 
+### Runs happen on your machine, started from the website
+
+The website cannot start a process on a laptop, and the laptop cannot accept an
+incoming connection. So neither calls the other — both talk to the project's
+sheet:
+
+```
+  dashboard ──── appends a row ────►  Runs tab  ◄──── polls every 15s ──── agent.py
+     (a browser)                    (the queue)                       (your machine)
+```
+
+Press **Run** and a row is queued. `agent.py`, running on whichever machine
+should do the work, claims it and reports back. Both ends only ever make
+*outbound* requests, which is why this works from any network with no tunnel,
+no port forward and no fixed address — and why closing the laptop simply means
+queued runs wait rather than fail.
+
+```bash
+export SETTINGS_WEB_APP_URL='https://script.google.com/macros/s/…/exec'
+export PROJECT_PASSWORD='the project password'
+python agent.py                     # leave it running
+```
+
+Polling doubles as the heartbeat, so the dashboard says whether a machine is
+listening — a run that quietly never happens is the failure worth designing
+against. Run stays enabled when nobody is there; the row waits.
+
+Two things that only matter when it goes wrong:
+
+- **Cancel** cannot kill a process on somebody else's laptop, so the run is
+  marked `cancelling` and the agent is told at its next progress report. It gets
+  SIGINT, not SIGKILL, so the pipeline unwinds rather than dying halfway through
+  writing to a spreadsheet.
+- A machine that is closed mid-run leaves a row saying `running` that nothing
+  will finish, blocking whatever is behind it. A run with no live agent and no
+  progress for fifteen minutes is marked **lost** — never killed, never called
+  successful.
+
+A run also leaves your working copy alone: CI rewrites `config.yaml` on a
+throwaway checkout, but this is a real repository, so the Settings overlay goes
+to a temporary copy.
+
+### On a timer
+
+The weekly cadence is a **time-driven trigger in the Apps Script**, not a cron
+on your machine — a laptop cron fires only if the machine happens to be awake,
+and silently does not if it is not. Queued from the script, a run waits and then
+happens.
+
+Set it up once: Apps Script editor → Triggers → Add trigger → `scheduledRun`,
+Time-driven, Week timer. Then each project opts in through its own Settings tab,
+so that one trigger serves every project:
+
+| setting | meaning |
+|---|---|
+| `schedule.enabled` | `true` to take part; absent means off |
+| `schedule.mode` | `full`, `scrape-only`, `validate-only`, … (default `full`) |
+
+### The dashboard shows the sheet, not a snapshot
+
+Data used to come from encrypted files a CI job exported and committed, which
+meant the page showed the last successful publish — indefinitely, with no sign
+it had stopped being true. It now reads each tab from the Web App as you open
+it. A published snapshot is still used as a fallback if the service is
+unreachable, and the chip above the table says which you are looking at.
+
+### What still touches GitHub
+
+Only Pages, and only as static hosting: a push that changes `site/` redeploys
+the page. That job runs no Python, handles no service-account key and exports no
+data. The old pipeline job is kept as a manual fallback for when no machine is
+available — it is the one thing that still needs the key, and it never runs on
+its own.
+
 ### It needs a password, not a key
 
 The machine running the pipeline needs **no Google credentials at all**:

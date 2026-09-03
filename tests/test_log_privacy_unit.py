@@ -149,11 +149,44 @@ class WorkflowSaysNothingIdentifying(unittest.TestCase):
                       "the log artifact is downloadable by any signed-in GitHub "
                       "user while the repository is public")
 
-    def test_both_jobs_raise_the_console_level(self):
+    def _runs_python(self, job) -> bool:
+        return any("python" in str(step.get("run", "")) or
+                   "python" in str(step.get("uses", ""))
+                   for step in job.get("steps", []))
+
+    def test_every_job_that_runs_python_raises_the_console_level(self):
+        """The pipeline logs project names; this log is world-readable.
+
+        Asked of the jobs that actually run it rather than of all of them —
+        publishing stopped exporting anything when the dashboard began reading
+        the sheet directly, so it runs no Python and has no such output. A job
+        that prints nothing does not need to be told to print less.
+        """
+        checked = 0
         for name, job in self.doc["jobs"].items():
+            if not self._runs_python(job):
+                continue
+            checked += 1
             with self.subTest(job=name):
                 self.assertEqual((job.get("env") or {}).get("LOG_CONSOLE_LEVEL"),
                                  "warning")
+        self.assertTrue(checked, "no job runs Python — has the workflow changed shape?")
+
+    def test_a_job_that_runs_no_python_names_no_project(self):
+        """The exemption above has to be earned, not assumed.
+
+        Its own steps could still echo a project name — the directories under
+        site/data are named for projects — so what it prints is checked too.
+        """
+        for name, job in self.doc["jobs"].items():
+            if self._runs_python(job):
+                continue
+            for step in job.get("steps", []):
+                script = str(step.get("run", ""))
+                with self.subTest(job=name, step=step.get("name", "")):
+                    self.assertNotIn("-maxdepth 1 -type d -print", script)
+                    self.assertNotIn("ls site/data", script)
+                    self.assertNotIn("find site/data -type f | sort", script)
 
 
 if __name__ == "__main__":

@@ -186,6 +186,9 @@ function buildSandbox(world) {
       },
       getRootFolder: () => makeFolder('root'),
     },
+    // A time-driven trigger has nobody to answer, so what happened goes to the
+    // execution log.
+    Logger: { log(message) { world.logged = (world.logged || []).concat(message); } },
     ContentService: {
       MimeType: { JAVASCRIPT: 'JAVASCRIPT', JSON: 'JSON' },
       // The mime type is kept, not discarded: whether a reply is javascript or
@@ -788,6 +791,68 @@ console.log('\nSettings.gs\n');
         world.sheets['sheet-a'].getSheetByName('Runs')
           .rows[2][4].charAt(0) === "'",
         world.sheets['sheet-a'].getSheetByName('Runs').rows[2][4]);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe schedule, which replaced the CI cron');
+  const settingsOf = id => world.sheets[id].getSheetByName('Settings');
+
+  const quiet = s.scheduledRun();
+  check('a project that has not opted in is left alone',
+        /alpha: not scheduled/.test(quiet), quiet);
+  check('and nothing was queued',
+        world.sheets['sheet-a'].getSheetByName('Runs') === null);
+
+  settingsOf('sheet-a').appendRow(['Schedule', 'schedule.enabled', 'true', 'bool', '', '']);
+  const ran = s.scheduledRun();
+  check('a project that opted in gets a run queued',
+        /alpha: queued full/.test(ran), ran);
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const view = get(s, { action: 'runs', token: auth.token });
+  check('and it is an ordinary queued run',
+        view.runs[0].status === 'queued' && view.runs[0].mode === 'full',
+        JSON.stringify(view.runs[0]));
+  check('marked as coming from the schedule, not a person',
+        view.runs[0].requested_by === 'schedule', view.runs[0].requested_by);
+
+  const again = s.scheduledRun();
+  check('a second firing does not stack a duplicate',
+        /skipped/.test(again) &&
+        get(s, { action: 'runs', token: auth.token }).runs.length === 1, again);
+
+  settingsOf('sheet-a').appendRow(['Schedule', 'schedule.mode', 'validate-only', 'text', '', '']);
+  post(s, { action: 'updateRun', token: auth.token, id: view.runs[0].id, status: 'done' });
+  s.scheduledRun();
+  const after = get(s, { action: 'runs', token: auth.token });
+  check('the mode is the project\'s own choice',
+        after.runs[0].mode === 'validate-only', after.runs[0].mode);
+
+  // One trigger serves every project, so one broken project must not silence
+  // the rest — and a trigger has nobody to show an error to.
+  settingsOf('sheet-b').appendRow(['Schedule', 'schedule.enabled', 'true', 'bool', '', '']);
+  const w2 = makeWorld(); const s2 = buildSandbox(w2); seedProjects(s2, w2);
+  w2.sheets['sheet-a'].getSheetByName('Settings')
+    .appendRow(['Schedule', 'schedule.enabled', 'true', 'bool', '', '']);
+  w2.sheets['sheet-b'].getSheetByName('Settings')
+    .appendRow(['Schedule', 'schedule.enabled', 'true', 'bool', '', '']);
+  // beta's spreadsheet disappears — shared, moved to a bin, whatever.
+  const rescue = w2.sheets['sheet-b'];
+  delete w2.sheets['sheet-b'];
+  const mixed = s2.scheduledRun();
+  w2.sheets['sheet-b'] = rescue;
+  check('a project that fails does not stop the others',
+        /alpha: queued full/.test(mixed) && /beta: FAILED/.test(mixed), mixed);
+  check('and what happened is written where it can be found',
+        (w2.logged || []).join('').indexOf('beta: FAILED') !== -1);
+
+  // An archived project is not a project any more.
+  const w3 = makeWorld(); const s3 = buildSandbox(w3); seedProjects(s3, w3);
+  w3.sheets['sheet-b'].getSheetByName('Settings')
+    .appendRow(['Schedule', 'schedule.enabled', 'true', 'bool', '', '']);
+  const archived = s3.scheduledRun();
+  check('an archived project is never scheduled',
+        archived.indexOf('gone:') === -1, archived);
 }
 
 {

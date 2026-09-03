@@ -205,21 +205,29 @@
             — it clones the repository, makes a Python virtual environment,
             installs the dependencies and checks they import.</p>
 
-          <h3>Then start it</h3>
-          <pre><code>cd ~/automated-scraping &amp;&amp; ./start_dashboard.sh</code></pre>
-          <p class="muted">Opens at <code>http://127.0.0.1:5000</code> — the same
-            panels as here, plus a Run tab that streams each task's log live as
-            it goes.</p>
-
           <h3>What it needs from you: a password</h3>
           <p>No Google credentials, no key file. The pipeline reads its keywords
             and settings from this project's service and sends what it finds
             back the same way, so the only thing your machine needs is the
             password you signed in with.</p>
           <pre><code>export SETTINGS_WEB_APP_URL='<span id="setup-exec">…</span>'
-export PROJECT_PASSWORD='your project password'
+export PROJECT_PASSWORD='your project password'</code></pre>
 
-./.venv/bin/python main.py --config config.yaml</code></pre>
+          <h3>Then leave the agent running</h3>
+          <p>This is what connects the Run buttons on this page to your
+            machine. Leave it going and the Runs tab will say your machine is
+            listening; press Run there and the work starts here.</p>
+          <pre><code>cd ~/automated-scraping &amp;&amp; ./.venv/bin/python agent.py</code></pre>
+          <p class="muted">It only ever makes outgoing requests, so it works
+            from any network — no port to open, no address to keep fixed. Close
+            the laptop and queued runs simply wait for it to come back.</p>
+
+          <h3>Or run one thing, once</h3>
+          <p class="muted">The agent is not required. Any part of the pipeline
+            runs on its own with the same two variables set.</p>
+          <pre><code>./.venv/bin/python main.py --config config.yaml            # scrape
+./.venv/bin/python job_validator.py --config config.yaml   # check links
+./.venv/bin/python automation_pipeline.py --config config.yaml  # everything</code></pre>
           <p class="hint">There is deliberately no key to hand out: one
             service-account key can read and write every spreadsheet it has ever
             been shared with, and there is no way to narrow it to a single
@@ -228,8 +236,16 @@ export PROJECT_PASSWORD='your project password'
 
           <h3>Why bother running it here</h3>
           <p class="muted">Indeed and Internshala refuse datacenter addresses —
-            a Cloudflare 403 and a challenge page respectively — so the
-            scheduled runs skip both. A home connection gets them back.</p>
+            a Cloudflare 403 and a challenge page respectively. A home
+            connection gets them back. It is also the whole automation with
+            nothing rented: no runner, no server, no minutes to run out.</p>
+
+          <h3>On a timer</h3>
+          <p class="muted">Set <code>schedule.enabled</code> to <code>true</code>
+            in Settings, and <code>schedule.mode</code> to whichever task should
+            repeat. The schedule lives with the project rather than on your
+            machine, so a run is queued whether or not the laptop was awake —
+            it starts when the agent is next listening.</p>
         </div>
       </div>
     </section>
