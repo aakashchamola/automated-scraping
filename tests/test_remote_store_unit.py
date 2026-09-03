@@ -62,6 +62,7 @@ class Stub(BaseHTTPRequestHandler):
     always_wrap = False
     callbacks_requested = []
     tabs = {}
+    old_deployment = False
 
     def log_message(self, *args):
         pass
@@ -111,6 +112,12 @@ class Stub(BaseHTTPRequestHandler):
         if not self._authorised(query.get("password", [""])[0]):
             return self._send({"ok": False, "error": "no project matched that password"},
                               callback=callback)
+        if Stub.old_deployment:
+            # What a deployment older than this code actually did: an
+            # unrecognised action fell through to a settings read, which is a
+            # valid-looking answer to a different question.
+            return self._send({"ok": True, "settings": {"columns": [], "rows": []}},
+                              callback=callback)
         if query.get("action", [""])[0] == "rows":
             tab = query.get("worksheet", [""])[0]
             # A tab that does not exist reads as empty, the way the Sheets-API
@@ -125,6 +132,11 @@ class Stub(BaseHTTPRequestHandler):
         if not self._authorised(body.get("password")):
             return self._send({"ok": False, "error": "no project matched that password"})
         Stub.posts.append(body)
+        if Stub.old_deployment:
+            # And this is the dangerous one: nothing to update, so it changed
+            # nothing and said ok.
+            return self._send({"ok": True, "applied": [], "unknown": [],
+                               "unchanged": []})
         action = body.get("action")
         tab = body.get("worksheet") or INPUTS["jobsWorksheet"]
 
@@ -196,6 +208,7 @@ class RemoteStoreTest(unittest.TestCase):
         Stub.callbacks_requested = []
         Stub.tabs = {name: [list(row) for row in rows]
                      for name, rows in TABS.items()}
+        Stub.old_deployment = False
         remote_store.BACKOFF_SEC = 0            # no real waiting in a test
         self.store = remote_store.RemoteSheetsStore(self.url, PASSWORD)
 
@@ -318,6 +331,38 @@ class RemoteStoreTest(unittest.TestCase):
         with self.assertRaises(remote_store.RemoteStoreError):
             self.store.replace_tab("Jobs_Test", [])
         self.assertEqual(len(Stub.tabs["Jobs_Test"]), 4)
+
+    # ── A deployment older than this code ─────────────────────────────────────
+
+    def test_a_read_an_old_deployment_cannot_serve_raises(self):
+        """It answered with the Settings tab, which parses fine and is wrong.
+
+        Trusting it meant validation saw an empty jobs tab, changed nothing,
+        and reported success.
+        """
+        Stub.old_deployment = True
+        with self.assertRaises(remote_store.RemoteStoreError) as caught:
+            self.store.load_all_rows("Jobs_Test")
+        self.assertIn("deploy a new version", str(caught.exception))
+
+    def test_a_write_an_old_deployment_swallows_raises(self):
+        """The worst case: ok:true over a column that was never written."""
+        Stub.old_deployment = True
+        for call in (
+            lambda: self.store.write_column_values(4, [["A"]], "Jobs_Test"),
+            lambda: self.store.ensure_column("Notes", "Jobs_Test"),
+            lambda: self.store.delete_rows("Jobs_Test", [2]),
+            lambda: self.store.replace_tab("Jobs_Test", [["A"]]),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaises(remote_store.RemoteStoreError) as caught:
+                    call()
+                self.assertIn("older than this code", str(caught.exception))
+
+    def test_an_old_deployment_cannot_silently_break_the_scrape_either(self):
+        Stub.old_deployment = True
+        with self.assertRaises(remote_store.RemoteStoreError):
+            self.store.load_existing()
 
     def test_colour_is_skipped_rather_than_failing_a_run(self):
         self.store.batch_format_rows([(2, {"red": 1}), (3, None)], 4, "Jobs_Test")

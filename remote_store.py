@@ -122,7 +122,16 @@ class RemoteSheetsStore:
 
     # ── Transport ─────────────────────────────────────────────────────────────
 
-    def _request(self, method: str, **kwargs):
+    def _request(self, method: str, expect: str = "", **kwargs):
+        """Call the Web App and return the parsed reply.
+
+        *expect* names a field the reply must carry. It guards against a
+        deployment older than this code: an unrecognised action used to be
+        answered as a settings read, and an unrecognised write landed in the
+        settings updater with nothing to update and answered ok — so a column
+        of validation statuses was discarded and reported as written. Newer
+        deployments refuse outright; this catches the ones that do not.
+        """
         import requests
 
         if not self.exec_url:
@@ -171,13 +180,19 @@ class RemoteSheetsStore:
 
         if not payload.get("ok"):
             raise RemoteStoreError(payload.get("error") or "the service refused the request")
+        if expect and expect not in payload:
+            raise RemoteStoreError(
+                f"the Settings service answered without '{expect}', so it does "
+                "not support this request. The deployment is older than this "
+                "code: re-paste apps-script/Settings.gs and deploy a new "
+                "version (Deploy -> Manage deployments -> edit -> New version).")
         return payload
 
     def _fetch_inputs(self) -> dict:
         if self._inputs is not None:
             return self._inputs
         logger.info("Fetching this project's inputs from the Settings service")
-        payload = self._request("GET", params={
+        payload = self._request("GET", expect="existingLinkHashes", params={
             "action": "inputs", "password": self.password})
         self._inputs = payload
         logger.info(
@@ -203,7 +218,7 @@ class RemoteSheetsStore:
         """
         if worksheet_name in (None, "Settings"):
             return [list(row) for row in self._fetch_inputs().get("settingsRows") or []]
-        payload = self._request("GET", params={
+        payload = self._request("GET", expect="rows", params={
             "action": "rows", "password": self.password,
             "worksheet": worksheet_name})
         return [list(row) for row in payload.get("rows") or []]
@@ -294,7 +309,7 @@ class RemoteSheetsStore:
         added = duplicates = 0
         for start in range(0, len(fresh), APPEND_BATCH):
             batch = fresh[start:start + APPEND_BATCH]
-            payload = self._request("POST", data=json.dumps({
+            payload = self._request("POST", expect="added", data=json.dumps({
                 "action": "appendJobs",
                 "password": self.password,
                 "worksheet": inputs.get("jobsWorksheet"),
@@ -316,7 +331,7 @@ class RemoteSheetsStore:
 
     def ensure_column(self, header_name: str, worksheet_name: str = None) -> int:
         """1-based position of a header, adding the column if it is missing."""
-        payload = self._request("POST", data=json.dumps({
+        payload = self._request("POST", expect="position", data=json.dumps({
             "action": "ensureColumn", "password": self.password,
             "worksheet": worksheet_name or "", "header": header_name}))
         return int(payload.get("position") or 0)
@@ -336,7 +351,7 @@ class RemoteSheetsStore:
         flat = [(v[0] if isinstance(v, (list, tuple)) else v) for v in values]
         for start in range(0, len(flat), COLUMN_BATCH):
             chunk = flat[start:start + COLUMN_BATCH]
-            self._request("POST", data=json.dumps({
+            self._request("POST", expect="written", data=json.dumps({
                 "action": "writeColumn", "password": self.password,
                 "worksheet": worksheet_name or "", "col": int(col),
                 "startRow": int(start_row) + start,
@@ -354,7 +369,7 @@ class RemoteSheetsStore:
             return 0
         deleted = 0
         for start in range(0, len(rows), DELETE_BATCH):
-            payload = self._request("POST", data=json.dumps({
+            payload = self._request("POST", expect="deleted", data=json.dumps({
                 "action": "deleteRows", "password": self.password,
                 "worksheet": worksheet_name or "",
                 "rows": rows[start:start + DELETE_BATCH]}))
@@ -368,7 +383,7 @@ class RemoteSheetsStore:
                  for row in rows or []]
         if not table:
             raise RemoteStoreError("refusing to replace a tab with nothing")
-        self._request("POST", data=json.dumps({
+        self._request("POST", expect="rows", data=json.dumps({
             "action": "replaceTab", "password": self.password,
             "worksheet": worksheet_name or "", "rows": table,
             "freezeHeader": bool(freeze_header)}))

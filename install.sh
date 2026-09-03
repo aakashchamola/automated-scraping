@@ -111,9 +111,19 @@ One more thing, and it is just a password.
     export SETTINGS_WEB_APP_URL='<the /exec URL from whoever runs the project>'
     export PROJECT_PASSWORD='<your project password>'
 
-  Then run the pipeline as normal:
+  Then run whichever part you want:
 
-    ./.venv/bin/python main.py --config config.yaml
+    ./.venv/bin/python main.py --config config.yaml               # scrape
+    ./.venv/bin/python job_validator.py --config config.yaml      # check links
+    ./.venv/bin/python company_enricher.py --config config.yaml   # fill companies
+    ./.venv/bin/python company_classifier.py --config config.yaml # classify them
+    ./.venv/bin/python company_validator.py --config config.yaml  # find mismatches
+    ./.venv/bin/python automation_pipeline.py --config config.yaml  # all of it
+
+  Every one of those works with the password alone. Worth running here rather
+  than on a server: LinkedIn and the ATS APIs answer a datacenter address fine,
+  but Indeed and Internshala return a Cloudflare challenge to one. A home
+  connection gets both back.
 
   There is deliberately no service-account key to hand out: one key can read
   and write every spreadsheet it has ever been shared with, and there is no way

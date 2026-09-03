@@ -105,6 +105,21 @@ reference to any. It needed three things: the keywords to search for, the
 settings to obey, and somewhere to put what it finds. All three go through the
 Apps Script, which does the reading and writing as the sheet's owner.
 
+Every run mode goes through it, not only the scrape:
+
+| mode | what it needs from the sheet |
+|---|---|
+| `scrape-only` | keywords, settings, the links already collected |
+| `validate-only` | the jobs tab, and a status column written back |
+| `enrich-only`, `classify-only`, `mismatch-only` | the Company tab, and columns written back |
+| `career-pages-only` | the Company tab's career pages, and rows appended |
+| `cleanup-rows` | the jobs tab, and rows deleted |
+
+Four of these used to build the Sheets-API store directly, so they demanded
+the key however the machine was set up — "run it on your own machine" was true
+for the scrape alone. `tests/test_store_parity_unit.py` now fails the build if
+any module does that again.
+
 That matters because a service-account key **cannot be scoped to one project**.
 It can read and write every spreadsheet it has ever been shared with, so
 handing it to someone to run a scrape gives them everything. A password reaches
@@ -116,10 +131,23 @@ one project, and it can be changed from the dashboard.
 | revoked by | rotating the key everywhere | changing that password |
 | safe to hand out | no | yes |
 
-What crosses the wire is deliberately narrow. Jobs already collected come back
-as short hashes rather than URLs — enough to skip a duplicate, and nothing
-more. The spreadsheet id never leaves at all, so the machine cannot open the
-sheet even if it wanted to.
+### What crosses the wire
+
+The **spreadsheet id never leaves**, so the machine cannot open the sheet
+directly even if it wanted to, and every request is confined to the one project
+its password selects.
+
+Beyond that, be clear-eyed about what a password holder can read. The scrape is
+narrow by design: the jobs already collected come back as short **hashes**
+rather than URLs — enough to skip a duplicate and nothing more. But the other
+modes read whole tabs, because they cannot do their job otherwise: validation
+exists to check that each job URL still resolves, so it has to be given the
+URLs. Enrichment and classification read the Company tab for the same reason.
+
+So a project password is not a read-restricted credential. It is full access to
+**that one project**, which is what the dashboard already grants it — the same
+password there edits Settings and Keywords. The isolation it buys is between
+projects, not within one.
 
 Results are deduplicated twice: by the caller against its snapshot, and again
 by the script against the live sheet. Only the second can see rows another
@@ -127,7 +155,14 @@ machine added while the run was going, and a run can take an hour.
 
 With `secrets/google-service-account.json` present the pipeline uses it
 directly instead, so nothing about running this on the owner's own machine
-changes.
+changes. Colour is the one thing that does not cross either way: the Web App
+has no formatting action, so a credential-free run logs that it skipped the
+row shading and writes identical data.
+
+Both stores expose the same fourteen methods, and a test compares them method
+by method — parameter names, order and defaults included, since a store taking
+`(values, col)` instead of `(col, values)` would write the wrong cells rather
+than raise.
 
 ## Passwords and keys
 

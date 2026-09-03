@@ -1487,9 +1487,19 @@ function doGet(e) {
         payload = { ok: true, project: authed.id, name: authed.name,
                     spreadsheetId: authed.spreadsheet_id,
                     createdAt: authed.created_at, notes: authed.notes };
-      } else {
+      } else if (action === 'settings') {
         payload = { ok: true, project: authed.id, settings: _readAll(authed),
                     readAt: new Date().toISOString() };
+      } else {
+        // Never fall through to a settings read. A caller asking for something
+        // this deployment does not have would otherwise be handed a perfectly
+        // valid answer to a different question — an older version answered
+        // action=rows with the Settings tab, so a validation run saw an empty
+        // jobs tab, changed nothing, and reported success.
+        payload = { ok: false, unknownAction: action, error:
+          "this deployment does not know the action '" + action + "'. It is " +
+          'probably older than the code asking — re-paste apps-script/' +
+          'Settings.gs and deploy a new version.' };
       }
     }
   } catch (err) {
@@ -1634,8 +1644,15 @@ function doPost(e) {
           result = _replaceTab(project, body);
         } else if (body.action === 'saveKeywords') {
           result = _writeKeywords(project, body.keywords || []);
-        } else {
+        } else if (!body.action || body.action === 'saveSettings') {
           result = _applyUpdates(project, body.updates || {});
+        } else {
+          // The dangerous one. An unrecognised write used to land here with no
+          // updates in it, so it changed nothing and answered ok — a column of
+          // validation statuses would be discarded and reported as written.
+          throw new Error("this deployment does not know the action '" +
+            body.action + "'. It is probably older than the code asking — " +
+            're-paste apps-script/Settings.gs and deploy a new version.');
         }
         result.ok = true;
         result.project = project.id;

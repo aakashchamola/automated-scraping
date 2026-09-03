@@ -590,6 +590,38 @@ console.log('\nSettings.gs\n');
 
 {
   const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nan action this deployment does not know is refused, not guessed at');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+
+  // A read used to fall through to the Settings tab: a valid-looking answer to
+  // a different question. The caller saw an empty jobs tab and did nothing.
+  const read = get(s, { action: 'somethingNew', token: auth.token });
+  check('an unknown read is refused',
+        read.ok === false && read.unknownAction === 'somethingNew', JSON.stringify(read));
+  check('and it says what to do about it',
+        /deploy a new version/.test(read.error), read.error);
+  const settings = get(s, { action: 'settings', token: auth.token });
+  check('while a real settings read still works', settings.ok === true &&
+        settings.settings.rows.length > 0);
+
+  // A write fell into the settings updater with nothing to update, and
+  // answered ok — a column of statuses discarded and reported as written.
+  const write = post(s, { action: 'somethingNew', token: auth.token, values: [['x']] });
+  check('an unknown write is refused rather than answered ok',
+        write.ok === false && /does not know the action/.test(write.error), write.error);
+
+  const save = post(s, { token: auth.token,
+                         updates: { 'scraping.max_pages': '7' } });
+  check('while the dashboard\'s own settings save is untouched',
+        save.ok === true && save.applied.length === 1, JSON.stringify(save));
+  const named = post(s, { action: 'saveSettings', token: auth.token,
+                          updates: { 'scraping.max_pages': '9' } });
+  check('named explicitly, it works too', named.ok === true &&
+        named.applied.length === 1, JSON.stringify(named));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
   console.log('\nthe reply is wrapped only for whoever asked for a wrapper');
 
   // The dashboard is a page with no CORS header to work with, so it can only
