@@ -88,9 +88,10 @@
       <div class="card">
         <div class="card-head">
           <h2>Run the automation</h2>
-          <span class="faint">Runs on GitHub's servers. The Google key stays in GitHub Secrets and never reaches this page.</span>
+          <span class="faint">Runs on your own machine. Nothing here needs a Google key.</span>
         </div>
         <div class="card-body">
+          <div id="agent-status" class="agent-status"></div>
           <div class="task-grid" id="run-actions"></div>
         </div>
       </div>
@@ -104,9 +105,10 @@
         </div>
         <div class="table-wrap" style="max-height:52vh">
           <table><thead><tr>
-            <th>Started</th><th>Workflow</th><th>Status</th><th>Duration</th><th>Logs</th>
+            <th>Requested</th><th>Task</th><th>Status</th><th>Duration</th><th>Machine</th><th></th>
           </tr></thead><tbody id="runs-body"></tbody></table>
         </div>
+        <div id="run-detail" class="run-detail" hidden></div>
       </div>
     </section>
 

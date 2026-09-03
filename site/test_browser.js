@@ -91,6 +91,11 @@ function buildSite(root) {
 const STUB_PORT = 8788;
 const SITE_PORT = 8787;
 
+// The queue the dashboard drives. Per project, because a run belongs to one.
+const QUEUES = { main: [], biotech: [] };
+const AGENTS = { main: { online: false, everSeen: false },
+                 biotech: { online: false, everSeen: false } };
+
 function startStub() {
   const posts = [];
   const server = http.createServer((req, res) => {
@@ -99,7 +104,24 @@ function startStub() {
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', () => {
-        try { posts.push(JSON.parse(body)); } catch { posts.push({ unparsed: body }); }
+        let parsed = null;
+        try { parsed = JSON.parse(body); posts.push(parsed); }
+        catch { posts.push({ unparsed: body }); }
+        // The queue actions have to actually change something, or a read-back
+        // proves nothing and the test passes on a stub that ignored the write.
+        if (parsed && parsed.token) {
+          const who = String(parsed.token).replace('token-', '');
+          const queue = QUEUES[who];
+          if (queue && parsed.action === 'requestRun') {
+            queue.unshift({ id: 'run-' + (queue.length + 1), mode: parsed.mode,
+                            status: 'queued', requested_at: new Date().toISOString(),
+                            requested_by: parsed.requestedBy || '', claimed_by: '',
+                            started_at: '', finished_at: '', exit_code: '', summary: '' });
+          } else if (queue && parsed.action === 'cancelRun') {
+            const hit = queue.find(r => r.id === parsed.id);
+            if (hit) { hit.status = 'cancelled'; hit.finished_at = new Date().toISOString(); }
+          }
+        }
         // Deliberately no Access-Control-Allow-Origin: the real Web App sends
         // none either, which is why writes must go out no-cors.
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -134,7 +156,11 @@ function startStub() {
       const id = (p.get('token') || '').replace('token-', '');
       const spec = PROJECTS[id];
       if (!spec) payload = { ok: false, error: 'no project matched that password', signedOut: true };
-      else if (p.get('action') === 'keywords') {
+      else if (p.get('action') === 'runs') {
+        payload = { ok: true, project: id, runs: QUEUES[id] || [],
+                    agent: AGENTS[id] || { online: false, everSeen: false },
+                    onlineWithinSec: 90 };
+      } else if (p.get('action') === 'keywords') {
         payload = { ok: true, project: id, keywords: { keywords: [id + ' analyst'], column: 'Search Term' } };
       } else {
         payload = { ok: true, project: id, settings: { columns: ['Group', 'Setting', 'Value', 'Type'],
@@ -403,6 +429,95 @@ function check(label, ok, detail) {
     await page.reload();
     await page.waitForSelector('#gate:not([hidden])');
     check('and it stays locked after a reload', await page.isHidden('#app'));
+
+    console.log('\nstarting a run on your own machine');
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('main-password-1');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    await page.click('[data-panel="panel-runs"]');
+    await page.waitForSelector('#run-actions .task', { timeout: 15000 });
+
+    // Nothing has ever connected, and that must be said rather than implied by
+    // a run that silently never starts.
+    const cold = await page.textContent('#agent-status');
+    check('with no machine connected the page says so',
+          /No machine has connected/i.test(cold), cold);
+    check('but Run is still offered, because the queue waits',
+          await page.isEnabled('#run-actions .task button'));
+
+    AGENTS.main = { online: true, everSeen: true, agent: 'the-laptop', secondsAgo: 3 };
+    await page.click('#btn-refresh-runs');
+    await page.waitForFunction(
+      () => /the-laptop/.test(document.getElementById('agent-status').textContent),
+      null, { timeout: 15000 });
+    check('and names the machine once one is listening',
+          /listening/.test(await page.textContent('#agent-status')));
+
+    const queueLength = () => QUEUES.main.length;
+    await page.click('#run-actions .task button');
+    await page.waitForFunction(
+      () => document.querySelectorAll('#runs-body tr').length > 0 &&
+            !/Nothing has been run/.test(document.getElementById('runs-body').textContent),
+      null, { timeout: 25000 });
+    check('pressing Run queues exactly one run', queueLength() === 1,
+          JSON.stringify(QUEUES.main));
+    check('and it was sent as a request, not a command',
+          stub.posts.some(p => p.action === 'requestRun' && p.mode === 'full'),
+          JSON.stringify(stub.posts.slice(-1)));
+    check('the button then shows the run is queued, and cannot be pressed twice',
+          await page.isDisabled('#run-actions .task button'));
+
+    // The row is the proof: the page must show what the queue actually says.
+    const rowText = await page.textContent('#runs-body');
+    check('the queued run is listed', /queued/.test(rowText), rowText.slice(0, 120));
+
+    // Cancel, and prove it reached the far side rather than only the screen.
+    await page.click('#runs-body button');
+    await page.waitForFunction(
+      () => /cancelled/.test(document.getElementById('runs-body').textContent),
+      null, { timeout: 25000 });
+    check('cancelling reaches the queue',
+          QUEUES.main[0].status === 'cancelled', QUEUES.main[0].status);
+    check('and the card is offered again once it is over',
+          await page.isEnabled('#run-actions .task button'));
+
+    // A finished run's output is on the machine; the summary is here.
+    QUEUES.main.unshift({ id: 'run-old', mode: 'validate-only', status: 'failed',
+                          requested_at: new Date().toISOString(), requested_by: 'dashboard',
+                          claimed_by: 'the-laptop', started_at: new Date().toISOString(),
+                          finished_at: new Date().toISOString(), exit_code: '3',
+                          summary: 'exit 3 after 12s\n\nTraceback: the sheet is gone' });
+    await page.click('#btn-refresh-runs');
+    await page.waitForFunction(
+      () => /failed/.test(document.getElementById('runs-body').textContent),
+      null, { timeout: 15000 });
+    await page.click('#runs-body tr:first-child button');
+    await page.waitForSelector('#run-detail:not([hidden])', { timeout: 10000 });
+    const detail = await page.textContent('#run-detail');
+    check('a failed run shows what went wrong', /the sheet is gone/.test(detail), detail);
+    check('and says where the full log is', /logs\/agent\/run-old\.log/.test(detail), detail);
+
+    // A queue belongs to its project, like everything else. Signed into rather
+    // than switched to: the lock test above signed out of everything, so
+    // Biotech is not unlocked at this point.
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    await page.click('#project-menu .menu-item:has-text("Unlock another project")');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('biotech-password-1');
+    await page.waitForFunction(
+      () => document.getElementById('project-name').textContent.includes('Biotech'),
+      null, { timeout: 20000 });
+    await page.click('[data-panel="panel-runs"]');
+    await page.waitForSelector('#run-actions .task', { timeout: 15000 });
+    const otherRuns = await page.textContent('#runs-body');
+    check("another project's queue is its own",
+          /Nothing has been run/.test(otherRuns), otherRuns.slice(0, 80));
+
+    // Locked again, because the next test starts from a signed-out page.
+    await page.click('#btn-lock');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
 
     console.log('\nwhen the sign-in service is down');
     // There is no offline fallback any more: it stamped a real project id into

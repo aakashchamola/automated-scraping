@@ -808,6 +808,349 @@ function _deleteRows(project, body) {
 }
 
 
+/* ── The run queue ──────────────────────────────────────────────────────────
+   What lets the pipeline run on someone's own machine while the website stays
+   the way you ask for it.
+
+   The website cannot start a process on a laptop, and the laptop cannot accept
+   an incoming connection — it is behind a router, asleep half the time, and on
+   a different address every week. So neither calls the other. Both talk to the
+   sheet: the page appends a row saying what it wants, and the machine polls for
+   one and claims it. That is the whole mechanism, and it works through any
+   firewall because both ends only ever make outbound requests.
+
+   The queue lives in a Runs tab in the project's own spreadsheet, for the same
+   reason everything else does: it is visible, editable and debuggable without
+   this script, and a project's history belongs to the project.
+
+   Claiming is the one part that must be exactly right. Two machines polling the
+   same project would otherwise both take the same row and scrape everything
+   twice, so a claim reads and writes under a script lock and re-reads the row's
+   status inside it — the check and the write have to be one indivisible step. */
+
+var RUNS_TAB = 'Runs';
+var RUNS_HEADER = ['id', 'mode', 'status', 'requested_at', 'requested_by',
+                   'claimed_by', 'started_at', 'finished_at', 'exit_code',
+                   'summary'];
+
+// Every mode the dashboard offers. Named here so a typo or a stale page cannot
+// queue a run that no agent knows how to carry out — it would sit there
+// forever looking like the machine was offline.
+var RUN_MODES = ['full', 'scrape-only', 'career-pages-only', 'enrich-only',
+                 'validate-only', 'mismatch-only', 'classify-only',
+                 'pagination-only', 'cleanup-rows', 'publish-only'];
+
+// A run left "running" by a machine that was closed, slept or lost power would
+// otherwise block the queue for good. Nothing is force-killed: it is marked
+// lost once the agent has stopped saying it is alive.
+var RUN_STALE_MS = 15 * 60 * 1000;
+
+// How recently an agent must have polled to count as listening. Comfortably
+// more than the poll interval, so one slow round trip does not read as offline.
+var AGENT_ONLINE_MS = 90 * 1000;
+
+// The Runs tab is history, not an archive. Trimmed from the top so the newest
+// are always kept.
+var RUNS_KEEP = 300;
+
+function _runsSheet(project) {
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var sheet = spreadsheet.getSheetByName(RUNS_TAB);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(RUNS_TAB);
+    sheet.getRange(1, 1, 1, RUNS_HEADER.length).setValues([RUNS_HEADER]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  // A tab that exists but has no header — someone cleared it — is repaired
+  // rather than failing every run from then on.
+  var first = sheet.getRange(1, 1, 1, RUNS_HEADER.length).getValues()[0];
+  if (first.every(function (v) { return !String(v).trim(); })) {
+    sheet.getRange(1, 1, 1, RUNS_HEADER.length).setValues([RUNS_HEADER]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** Runs newest first, each with its sheet row number. */
+function _runRows(project) {
+  var values = _runsSheet(project).getDataRange().getValues();
+  if (values.length < 2) return [];
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var run = {};
+    for (var c = 0; c < header.length; c++) {
+      if (header[c]) run[header[c]] = String(values[r][c] == null ? '' : values[r][c]);
+    }
+    if (!String(run.id || '').trim()) continue;
+    run._row = r + 1;
+    out.push(run);
+  }
+  return out.reverse();
+}
+
+function _writeRun(project, run, changes) {
+  var sheet = _runsSheet(project);
+  var header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  Object.keys(changes).forEach(function (field) {
+    var at = header.indexOf(field);
+    if (at >= 0) sheet.getRange(run._row, at + 1).setValue(changes[field]);
+  });
+}
+
+function _now() {
+  return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+/**
+ * A run's age in milliseconds, or Infinity when it has no usable timestamp.
+ *
+ * Infinity rather than 0 deliberately: a row with a corrupt started_at should
+ * read as long dead and be cleared, not as brand new and blocking forever.
+ */
+function _ageMs(stamp) {
+  var parsed = Date.parse(String(stamp || ''));
+  if (isNaN(parsed)) return Infinity;
+  return Date.now() - parsed;
+}
+
+/* ── The agent's heartbeat ──────────────────────────────────────────────────
+   In a script property rather than a sheet cell. The agent polls every few
+   seconds, and a spreadsheet write per poll would be both slow and a steady
+   drain on the per-minute write quota that the actual runs need. */
+
+function _agentKey(projectId) {
+  return 'AGENT:' + projectId;
+}
+
+function _recordHeartbeat(projectId, agent, version) {
+  _props().setProperty(_agentKey(projectId), JSON.stringify({
+    agent: String(agent || 'unnamed'), at: Date.now(),
+    version: String(version || '')
+  }));
+}
+
+function _agentStatus(projectId) {
+  var raw = _props().getProperty(_agentKey(projectId));
+  if (!raw) return { online: false, everSeen: false };
+  var seen;
+  try {
+    seen = JSON.parse(raw);
+  } catch (err) {
+    return { online: false, everSeen: false };
+  }
+  var since = Date.now() - (seen.at || 0);
+  return {
+    online: since < AGENT_ONLINE_MS,
+    everSeen: true,
+    agent: seen.agent || '',
+    version: seen.version || '',
+    secondsAgo: Math.round(since / 1000)
+  };
+}
+
+/**
+ * Runs left behind by a machine that stopped without saying so.
+ *
+ * A laptop that was closed mid-run leaves a row saying "running" that nothing
+ * will ever finish, and while it sits there a queued run behind it never
+ * starts. Anything running with no agent alive and no progress for long enough
+ * is marked lost, which unblocks the queue without pretending it succeeded.
+ */
+function _reapStaleRuns(project) {
+  var agent = _agentStatus(project.id);
+  if (agent.online) return 0;          // still alive; it is simply a long run
+  var reaped = 0;
+  _runRows(project).forEach(function (run) {
+    if (run.status !== 'running' && run.status !== 'cancelling') return;
+    if (_ageMs(run.started_at) < RUN_STALE_MS) return;
+    _writeRun(project, run, {
+      status: 'lost', finished_at: _now(),
+      summary: 'the machine running this stopped reporting; it may or may not ' +
+               'have finished. Nothing was killed — check the sheet.'
+    });
+    reaped++;
+  });
+  return reaped;
+}
+
+/** Queue a run. The dashboard's half of the exchange. */
+function _requestRun(project, body) {
+  var mode = String(body.mode || '').trim();
+  if (RUN_MODES.indexOf(mode) === -1) {
+    throw new Error("'" + mode + "' is not a run mode this project knows");
+  }
+
+  var sheet = _runsSheet(project);
+  var existing = _runRows(project);
+
+  // One at a time. Queueing the same mode twice while it is already waiting is
+  // almost always a double click, and two full scrapes at once would fight
+  // over the same sheet.
+  var waiting = existing.filter(function (run) {
+    return (run.status === 'queued' || run.status === 'running') && run.mode === mode;
+  });
+  if (waiting.length) {
+    return { queued: false, already: true, run: _publicRun(waiting[0]),
+             message: "'" + mode + "' is already " + waiting[0].status };
+  }
+
+  var id = 'r' + Date.now().toString(36) + Utilities.getUuid().substring(0, 4);
+  var record = {
+    id: id, mode: mode, status: 'queued', requested_at: _now(),
+    requested_by: _plainText(String(body.requestedBy || 'dashboard')),
+    claimed_by: '', started_at: '', finished_at: '', exit_code: '', summary: ''
+  };
+  var header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  sheet.appendRow(header.map(function (col) {
+    return record.hasOwnProperty(col) ? record[col] : '';
+  }));
+
+  // Trim oldest-first, after appending, so history never grows without bound.
+  var total = sheet.getLastRow() - 1;
+  if (total > RUNS_KEEP) sheet.deleteRows(2, total - RUNS_KEEP);
+
+  var agent = _agentStatus(project.id);
+  return {
+    queued: true, run: record, agentOnline: agent.online,
+    message: agent.online
+      ? 'queued — your machine should pick it up within a few seconds'
+      : (agent.everSeen
+          ? 'queued, but no machine is listening right now. It will start as ' +
+            'soon as the agent is running again.'
+          : 'queued, but no machine has ever connected to this project. Run ' +
+            'the agent on the machine that should do the work.')
+  };
+}
+
+/**
+ * Take the oldest queued run, or answer that there is none.
+ *
+ * Also the agent's heartbeat, deliberately: it polls constantly, and folding
+ * "I am alive" into the same request halves the traffic and means a machine
+ * cannot look online while failing to actually poll for work.
+ */
+function _claimRun(project, body) {
+  var agent = String(body.agent || 'unnamed');
+  _recordHeartbeat(project.id, agent, body.version);
+  var reaped = _reapStaleRuns(project);
+
+  var queued = _runRows(project).filter(function (run) {
+    return run.status === 'queued';
+  });
+  if (!queued.length) return { run: null, reaped: reaped };
+
+  // Oldest first: _runRows is newest-first, so the last one is the oldest.
+  var chosen = queued[queued.length - 1];
+
+  // Re-read this row inside the lock the caller holds. The list above came
+  // from a read that another agent may already have acted on, and claiming on
+  // a stale status is exactly how two machines end up running the same job.
+  var fresh = _runRows(project).filter(function (run) {
+    return run.id === chosen.id;
+  })[0];
+  if (!fresh || fresh.status !== 'queued') return { run: null, reaped: reaped };
+
+  var startedAt = _now();
+  _writeRun(project, fresh, {
+    status: 'running', claimed_by: _plainText(agent), started_at: startedAt
+  });
+  // Mirrored onto the object as well, because that is what is sent back — and
+  // the agent uses started_at to report how long it has been going.
+  fresh.status = 'running';
+  fresh.claimed_by = agent;
+  fresh.started_at = startedAt;
+  return { run: _publicRun(fresh), reaped: reaped };
+}
+
+/** Report progress or completion. */
+function _updateRun(project, body) {
+  var id = String(body.id || '').trim();
+  if (!id) throw new Error('a run id is required');
+  var run = _runRows(project).filter(function (r) { return r.id === id; })[0];
+  if (!run) throw new Error("no run '" + id + "' in this project");
+
+  var allowed = ['running', 'done', 'failed', 'cancelled'];
+  var changes = {};
+  if (body.status) {
+    if (allowed.indexOf(String(body.status)) === -1) {
+      throw new Error("'" + body.status + "' is not a run status");
+    }
+    var next = String(body.status);
+    // A progress report must never overwrite 'cancelling'. It arrives every
+    // twenty seconds saying 'running', and letting it win means the request to
+    // stop is erased moments after it is made and the machine is never told.
+    if (!(next === 'running' && run.status === 'cancelling')) {
+      changes.status = next;
+      if (next !== 'running') changes.finished_at = _now();
+    }
+  }
+  if (body.summary !== undefined) {
+    // Sheets refuses a cell over 50,000 characters, and a summary is a summary.
+    changes.summary = _plainText(String(body.summary).substring(0, 4000));
+  }
+  if (body.exitCode !== undefined && body.exitCode !== null) {
+    changes.exit_code = String(body.exitCode);
+  }
+  _writeRun(project, run, changes);
+
+  // Answered on every update so a long run learns it was cancelled without
+  // needing a separate call: the agent stops at the next checkpoint.
+  var after = _runRows(project).filter(function (r) { return r.id === id; })[0];
+  return { updated: id, cancelRequested: after && after.status === 'cancelling' };
+}
+
+/**
+ * Ask for a run to stop.
+ *
+ * A queued run is simply dropped. A running one cannot be killed from here —
+ * the process is on somebody's laptop — so it is marked cancelling and the
+ * agent is told at its next update. It stops at a checkpoint rather than being
+ * torn down mid-write, which is what you want when the thing it is writing to
+ * is a spreadsheet.
+ */
+function _cancelRun(project, body) {
+  var id = String(body.id || '').trim();
+  var run = _runRows(project).filter(function (r) { return r.id === id; })[0];
+  if (!run) throw new Error("no run '" + id + "' in this project");
+
+  if (run.status === 'queued') {
+    _writeRun(project, run, { status: 'cancelled', finished_at: _now(),
+                              summary: 'cancelled before it started' });
+    return { cancelled: id, wasRunning: false };
+  }
+  if (run.status === 'running') {
+    _writeRun(project, run, { status: 'cancelling' });
+    return { cancelled: id, wasRunning: true,
+             message: 'asked the machine to stop; it will finish the step it ' +
+                      'is on first' };
+  }
+  return { cancelled: id, wasRunning: false,
+           message: 'that run had already ' + run.status };
+}
+
+/** The fields worth sending on. `_row` is bookkeeping and would only confuse. */
+function _publicRun(run) {
+  var out = {};
+  RUNS_HEADER.forEach(function (field) { out[field] = run[field] || ''; });
+  return out;
+}
+
+/** Recent history plus whether a machine is listening — the dashboard's view. */
+function _runsView(project, params) {
+  var limit = parseInt(params.limit, 10) || 20;
+  _reapStaleRuns(project);
+  var runs = _runRows(project).slice(0, Math.min(limit, 100)).map(_publicRun);
+  return {
+    runs: runs, modes: RUN_MODES, agent: _agentStatus(project.id),
+    onlineWithinSec: Math.round(AGENT_ONLINE_MS / 1000)
+  };
+}
+
+
 /* ── Creating a project ─────────────────────────────────────────────────────
    Everything a new project needs, in one call: the spreadsheet, its tabs, the
    service account's editor grant, and the registry row. Nothing is left for
@@ -1472,6 +1815,10 @@ function doGet(e) {
       } else if (action === 'keywords') {
         payload = { ok: true, project: authed.id, keywords: _readKeywords(authed),
                     readAt: new Date().toISOString() };
+      } else if (action === 'runs') {
+        payload = _runsView(authed, params);
+        payload.ok = true;
+        payload.project = authed.id;
       } else if (action === 'rows') {
         // Any one tab of this project's own spreadsheet. What the validator,
         // the enricher and the career-page pass all need and could not get.
@@ -1642,6 +1989,14 @@ function doPost(e) {
           result = _deleteRows(project, body);
         } else if (body.action === 'replaceTab') {
           result = _replaceTab(project, body);
+        } else if (body.action === 'requestRun') {
+          result = _requestRun(project, body);
+        } else if (body.action === 'claimRun') {
+          result = _claimRun(project, body);
+        } else if (body.action === 'updateRun') {
+          result = _updateRun(project, body);
+        } else if (body.action === 'cancelRun') {
+          result = _cancelRun(project, body);
         } else if (body.action === 'saveKeywords') {
           result = _writeKeywords(project, body.keywords || []);
         } else if (!body.action || body.action === 'saveSettings') {

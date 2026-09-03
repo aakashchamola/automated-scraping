@@ -622,6 +622,176 @@ console.log('\nSettings.gs\n');
 
 {
   const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe run queue');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const runsTab = () => world.sheets['sheet-a'].getSheetByName('Runs');
+
+  const view0 = get(s, { action: 'runs', token: auth.token });
+  check('a project with no history has an empty queue',
+        view0.ok === true && view0.runs.length === 0, JSON.stringify(view0.runs));
+  check('and says no machine has ever connected',
+        view0.agent.online === false && view0.agent.everSeen === false,
+        JSON.stringify(view0.agent));
+  check('the Runs tab is created on demand', runsTab() !== null);
+
+  const bad = post(s, { action: 'requestRun', token: auth.token, mode: 'rm -rf' });
+  check('a mode the project does not know is refused',
+        bad.ok === false && /not a run mode/.test(bad.error), bad.error);
+
+  const asked = post(s, { action: 'requestRun', token: auth.token,
+                          mode: 'scrape-only', requestedBy: 'dashboard' });
+  check('a run can be queued', asked.ok === true && asked.queued === true &&
+        asked.run.status === 'queued', JSON.stringify(asked));
+  check('and it says plainly that nothing is listening yet',
+        asked.agentOnline === false && /no machine has ever connected/.test(asked.message),
+        asked.message);
+
+  const twice = post(s, { action: 'requestRun', token: auth.token, mode: 'scrape-only' });
+  check('queueing the same mode twice does not double it',
+        twice.already === true && runsTab().rows.length === 2, twice.message);
+
+  // The agent's half.
+  const claimed = post(s, { action: 'claimRun', token: auth.token, agent: 'laptop' });
+  check('an agent claims the queued run',
+        claimed.run && claimed.run.id === asked.run.id &&
+        claimed.run.status === 'running', JSON.stringify(claimed.run));
+  check('and is recorded as the machine that has it',
+        claimed.run.claimed_by === 'laptop' && claimed.run.started_at !== '');
+
+  const empty = post(s, { action: 'claimRun', token: auth.token, agent: 'laptop' });
+  check('a second claim finds nothing left', empty.run === null);
+
+  // The race that matters: the same row must never go to two machines.
+  const w2 = makeWorld(); const s2 = buildSandbox(w2); seedProjects(s2, w2);
+  const a2 = get(s2, { action: 'auth', password: 'pw-alpha-secret' });
+  post(s2, { action: 'requestRun', token: a2.token, mode: 'full' });
+  const first = post(s2, { action: 'claimRun', token: a2.token, agent: 'one' });
+  const second = post(s2, { action: 'claimRun', token: a2.token, agent: 'two' });
+  check('two machines cannot claim the same run',
+        first.run !== null && second.run === null,
+        JSON.stringify([first.run && first.run.claimed_by, second.run]));
+
+  // Polling is the heartbeat, so the dashboard knows someone is there.
+  const view1 = get(s, { action: 'runs', token: auth.token });
+  check('polling marks the machine online',
+        view1.agent.online === true && view1.agent.agent === 'laptop',
+        JSON.stringify(view1.agent));
+  check('and the run shows as running',
+        view1.runs[0].status === 'running', JSON.stringify(view1.runs[0]));
+
+  const progress = post(s, { action: 'updateRun', token: auth.token,
+                             id: asked.run.id, status: 'running',
+                             summary: 'running for 20s' });
+  check('progress can be reported without finishing',
+        progress.ok === true && progress.cancelRequested === false);
+
+  const finished = post(s, { action: 'updateRun', token: auth.token,
+                             id: asked.run.id, status: 'done', exitCode: 0,
+                             summary: 'finished in 61s' });
+  check('and the run can be finished', finished.ok === true);
+  const view2 = get(s, { action: 'runs', token: auth.token });
+  check('which is what the dashboard then shows',
+        view2.runs[0].status === 'done' && view2.runs[0].exit_code === '0' &&
+        view2.runs[0].finished_at !== '', JSON.stringify(view2.runs[0]));
+
+  const ghost = post(s, { action: 'updateRun', token: auth.token, id: 'nope',
+                          status: 'done' });
+  check('an update for a run that does not exist is refused',
+        ghost.ok === false && /no run/.test(ghost.error), ghost.error);
+  const badStatus = post(s, { action: 'updateRun', token: auth.token,
+                              id: asked.run.id, status: 'whatever' });
+  check('and so is a status that is not a status',
+        badStatus.ok === false && /not a run status/.test(badStatus.error));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ncancelling, and machines that vanish');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+
+  const queued = post(s, { action: 'requestRun', token: auth.token, mode: 'full' });
+  const dropped = post(s, { action: 'cancelRun', token: auth.token, id: queued.run.id });
+  check('a run that has not started is simply dropped',
+        dropped.wasRunning === false, JSON.stringify(dropped));
+  const afterDrop = get(s, { action: 'runs', token: auth.token });
+  check('and no agent can claim it afterwards',
+        afterDrop.runs[0].status === 'cancelled' &&
+        post(s, { action: 'claimRun', token: auth.token, agent: 'x' }).run === null);
+
+  // A running one is on somebody's laptop and cannot be killed from here.
+  const live = post(s, { action: 'requestRun', token: auth.token, mode: 'scrape-only' });
+  post(s, { action: 'claimRun', token: auth.token, agent: 'laptop' });
+  const stopping = post(s, { action: 'cancelRun', token: auth.token, id: live.run.id });
+  check('a running one is asked to stop rather than killed',
+        stopping.wasRunning === true && /finish the step/.test(stopping.message),
+        stopping.message);
+  const told = post(s, { action: 'updateRun', token: auth.token, id: live.run.id,
+                         status: 'running', summary: 'still going' });
+  check('and the machine is told at its next progress report',
+        told.cancelRequested === true, JSON.stringify(told));
+
+  // A laptop that was closed mid-run leaves a row nothing will ever finish.
+  const w2 = makeWorld(); const s2 = buildSandbox(w2); seedProjects(s2, w2);
+  const a2 = get(s2, { action: 'auth', password: 'pw-alpha-secret' });
+  post(s2, { action: 'requestRun', token: a2.token, mode: 'full' });
+  post(s2, { action: 'claimRun', token: a2.token, agent: 'doomed' });
+  post(s2, { action: 'requestRun', token: a2.token, mode: 'scrape-only' });
+
+  // Backdate the claim and silence the heartbeat: the machine is gone.
+  const sheet = w2.sheets['sheet-a'].getSheetByName('Runs');
+  sheet.rows[1][6] = '2020-01-01T00:00:00Z';          // started_at
+  delete w2.props['AGENT:alpha'];
+
+  const view = get(s2, { action: 'runs', token: a2.token });
+  const lost = view.runs.filter(r => r.status === 'lost');
+  check('an abandoned run is marked lost, not left running',
+        lost.length === 1 && /stopped reporting/.test(lost[0].summary),
+        JSON.stringify(view.runs.map(r => r.status)));
+  check('which unblocks what was queued behind it',
+        post(s2, { action: 'claimRun', token: a2.token, agent: 'new' }).run.mode
+          === 'scrape-only');
+
+  // But a long run whose machine is still polling must be left alone.
+  const w3 = makeWorld(); const s3 = buildSandbox(w3); seedProjects(s3, w3);
+  const a3 = get(s3, { action: 'auth', password: 'pw-alpha-secret' });
+  post(s3, { action: 'requestRun', token: a3.token, mode: 'full' });
+  post(s3, { action: 'claimRun', token: a3.token, agent: 'slow' });
+  w3.sheets['sheet-a'].getSheetByName('Runs').rows[1][6] = '2020-01-01T00:00:00Z';
+  const still = get(s3, { action: 'runs', token: a3.token });
+  check('a long run with a live agent is not reaped',
+        still.runs[0].status === 'running', JSON.stringify(still.runs[0]));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe queue is a project\'s own, like everything else');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  post(s, { action: 'requestRun', token: auth.token, mode: 'full' });
+
+  const other = get(s, { action: 'auth', password: 'pw-beta-secret' });
+  const view = get(s, { action: 'runs', token: other.token });
+  check("another project's queue is its own, and empty",
+        view.ok === true && view.runs.length === 0, JSON.stringify(view.runs));
+  check('and its agent status is separate too', view.agent.everSeen === false);
+
+  const noPassword = post(s, { action: 'requestRun', mode: 'full' });
+  check('queueing a run needs a password',
+        noPassword.ok === false && noPassword.signedOut === true);
+  const noPasswordClaim = post(s, { action: 'claimRun', agent: 'anyone' });
+  check('and so does claiming one',
+        noPasswordClaim.ok === false && noPasswordClaim.signedOut === true);
+
+  // A run row is written from what someone typed into the dashboard.
+  const sneaky = post(s, { action: 'requestRun', token: auth.token,
+                           mode: 'scrape-only', requestedBy: '=IMPORTRANGE("x","y")' });
+  check('a formula in the requester name is written as text',
+        world.sheets['sheet-a'].getSheetByName('Runs')
+          .rows[2][4].charAt(0) === "'",
+        world.sheets['sheet-a'].getSheetByName('Runs').rows[2][4]);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
   console.log('\nthe reply is wrapped only for whoever asked for a wrapper');
 
   // The dashboard is a page with no CORS header to work with, so it can only

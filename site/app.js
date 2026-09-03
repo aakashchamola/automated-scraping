@@ -884,17 +884,21 @@ $('btn-export').addEventListener('click', () => {
   URL.revokeObjectURL(a.href);
 });
 
-/* ── Runs ───────────────────────────────────────────────────────────────── */
+/* ── Runs ─────────────────────────────────────────────────────────────────
+   Pressing Run here starts the work on the operator's OWN machine, not on
+   anyone's servers.
 
-/* The repository is public, so run history reads without any token. Starting a
-   run does need write access, which a static page cannot hold without exposing
-   it — so the button hands over to GitHub's own Run workflow dialog, where the
-   viewer's existing GitHub session authorises it. */
-const API = `https://api.github.com/repos/${CFG.repo}`;
+   This page cannot reach that machine — it is behind a router, asleep half the
+   time, and on a different address every week — and the machine cannot be
+   reached from the internet either. So neither calls the other. Both talk to
+   the project's sheet: this appends a row saying what is wanted, and the agent
+   running there polls for one and claims it. Both ends only make outbound
+   requests, which is why it works from any network.
 
-/* Every option the workflow accepts. The `choice` is the exact value to pick in
-   GitHub's Run workflow dialog, so the card and the dialog cannot drift apart
-   without it being obvious. */
+   That also means Run is a REQUEST, never a guarantee. If no machine is
+   listening the row simply waits, so the status line above the cards says
+   whether one is there — silence that looks like success is the failure mode
+   worth designing against. */
 const AUTOMATIONS = [
   ['Full pipeline', 'Enrich companies → career pages → job boards → validate links.', 'full', true],
   ['Job-board scraping', 'Search LinkedIn for every keyword and append new jobs.', 'scrape-only'],
@@ -908,6 +912,16 @@ const AUTOMATIONS = [
   ['Refresh this dashboard', 'Re-export and republish the data. Writes nothing to the sheet.', 'publish-only'],
 ];
 
+/* What the last poll said: which modes are busy, and whether a machine is on. */
+let RUN_STATE = { runs: [], agent: { online: false, everSeen: false } };
+let RUNS_TIMER = null;
+
+function busyMode(mode) {
+  return RUN_STATE.runs.find(
+    (r) => r.mode === mode && (r.status === 'queued' || r.status === 'running'
+                               || r.status === 'cancelling'));
+}
+
 function renderRunActions() {
   const grid = $('run-actions');
   grid.innerHTML = '';
@@ -916,16 +930,95 @@ function renderRunActions() {
     const h = el('h3', '', label);
     if (primary) h.append(el('span', 'pill info', 'main'));
     card.append(h, el('p', '', blurb));
-    card.append(el('div', 'detail', `Run workflow → “Which part of the pipeline to run” → ${choice}`));
     const row = el('div', 'run-row');
-    const a = el('a', 'btn primary', 'Run on GitHub ↗');
-    a.href = `https://github.com/${CFG.repo}/actions/workflows/${CFG.workflow}`;
-    a.target = '_blank'; a.rel = 'noopener';
-    a.title = `Opens the Run workflow dialog — choose "${choice}"`;
-    row.append(a);
+    const busy = busyMode(choice);
+    const btn = el('button', 'btn primary', busy ? busy.status : 'Run here');
+    btn.disabled = Boolean(busy);
+    /* Deliberately still enabled with no agent online. The run waits in the
+       queue and starts the moment the machine comes back, which is more useful
+       than refusing — but the status line says so, so it is never a surprise. */
+    btn.title = RUN_STATE.agent.online
+      ? `Runs on ${RUN_STATE.agent.agent || 'your machine'}`
+      : 'No machine is listening — this will wait in the queue';
+    btn.addEventListener('click', () => requestRun(choice, btn));
+    row.append(btn);
     card.append(row);
     grid.append(card);
   });
+}
+
+function renderAgentStatus() {
+  const box = $('agent-status');
+  const a = RUN_STATE.agent || {};
+  box.innerHTML = '';
+  const dot = el('span', `dot ${a.online ? 'ok' : (a.everSeen ? 'warn' : 'off')}`);
+  let text;
+  if (a.online) {
+    text = `${a.agent || 'A machine'} is listening — last seen ${a.secondsAgo}s ago.`;
+  } else if (a.everSeen) {
+    text = `${a.agent || 'The machine'} is not answering (last seen ` +
+           `${fmtAgo(a.secondsAgo)}). Anything you start will wait until it is back.`;
+  } else {
+    text = 'No machine has connected to this project yet. Start the agent on ' +
+           'the computer that should do the work — see “Run locally”.';
+  }
+  box.append(dot, el('span', '', text));
+}
+
+function fmtAgo(seconds) {
+  if (!Number.isFinite(seconds)) return 'a while ago';
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`;
+  return `${Math.round(seconds / 3600)} h ago`;
+}
+
+/* A write's reply cannot be read (no CORS header on /exec), so this posts
+   blind and then re-reads the queue to prove it landed. */
+async function requestRun(mode, btn) {
+  const previous = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Queueing…';
+  banner($('runs-error'), '', '');
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'requestRun', token: SESSION_TOKEN, mode,
+                             requestedBy: 'dashboard' }),
+    });
+    let landed = false;
+    for (let attempt = 0; attempt < 6 && !landed; attempt++) {
+      await new Promise((r) => setTimeout(r, attempt ? 1200 : 900));
+      await loadRuns({ quiet: true });
+      landed = Boolean(busyMode(mode));
+    }
+    if (!landed) {
+      banner($('runs-error'), 'err',
+        'The run was not queued. Your session may have expired — sign out and back in.');
+      btn.disabled = false;
+      btn.textContent = previous;
+    }
+  } catch (err) {
+    banner($('runs-error'), 'err', `Could not queue that run: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = previous;
+  }
+}
+
+async function cancelRun(id) {
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'cancelRun', token: SESSION_TOKEN, id }),
+    });
+    await new Promise((r) => setTimeout(r, 1200));
+    await loadRuns({ quiet: true });
+  } catch (err) {
+    banner($('runs-error'), 'err', `Could not cancel: ${err.message}`);
+  }
 }
 
 /* ── Settings ─────────────────────────────────────────────────────────────
@@ -1364,39 +1457,86 @@ function fmtDuration(a, b) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-async function loadRuns() {
-  banner($('runs-error'), '', '');
+const RUN_PILL = {
+  queued: 'neutral', running: 'warn', cancelling: 'warn',
+  done: 'ok', failed: 'err', cancelled: 'neutral', lost: 'err',
+};
+
+async function loadRuns(opts = {}) {
+  if (!opts.quiet) banner($('runs-error'), '', '');
   try {
-    const res = await fetch(`${API}/actions/runs?per_page=15`, {
-      headers: { Accept: 'application/vnd.github+json' } });
-    if (!res.ok) throw new Error(res.status === 403
-      ? 'GitHub rate limit reached — try again in a few minutes.'
-      : `HTTP ${res.status}`);
-    const { workflow_runs = [] } = await res.json();
+    const view = await jsonp(
+      `${SETTINGS_URL}?action=runs&token=${encodeURIComponent(SESSION_TOKEN)}&limit=25`);
+    if (!view.ok) throw new Error(view.error || 'the service refused the request');
+    RUN_STATE = { runs: view.runs || [], agent: view.agent || {} };
+    renderAgentStatus();
+    renderRunActions();
+
     const body = $('runs-body');
     body.innerHTML = '';
-    if (!workflow_runs.length) {
-      const tr = el('tr'), td = el('td', 'muted', 'No runs yet.');
-      td.colSpan = 5; tr.append(td); body.append(tr);
+    if (!RUN_STATE.runs.length) {
+      const tr = el('tr'), td = el('td', 'muted', 'Nothing has been run yet.');
+      td.colSpan = 6; tr.append(td); body.append(tr);
     }
-    workflow_runs.forEach((r) => {
-      const state = r.status !== 'completed' ? 'running' : (r.conclusion || 'unknown');
-      const cls = { success: 'ok', failure: 'err', cancelled: 'warn', running: 'warn' }[state] || 'neutral';
+    RUN_STATE.runs.forEach((r) => {
       const tr = el('tr');
-      tr.append(el('td', 'faint', new Date(r.created_at).toLocaleString()),
-                el('td', '', r.name || '—'));
-      const st = el('td'); st.append(el('span', `pill ${cls}`, state)); tr.append(st);
-      tr.append(el('td', 'faint', fmtDuration(r.run_started_at, r.updated_at)));
-      const link = el('td');
-      const a = el('a', '', 'view ↗');
-      a.href = r.html_url; a.target = '_blank'; a.rel = 'noopener';
-      link.append(a); tr.append(link);
+      tr.append(el('td', 'faint', r.requested_at
+        ? new Date(r.requested_at).toLocaleString() : '—'));
+      tr.append(el('td', '', labelFor(r.mode)));
+      const st = el('td');
+      st.append(el('span', `pill ${RUN_PILL[r.status] || 'neutral'}`, r.status));
+      tr.append(st);
+      tr.append(el('td', 'faint', fmtDuration(r.started_at,
+        r.finished_at || (r.status === 'running' ? new Date().toISOString() : ''))));
+      tr.append(el('td', 'faint', r.claimed_by || '—'));
+
+      const actions = el('td');
+      if (r.status === 'queued' || r.status === 'running') {
+        const stop = el('button', 'btn sm', 'Cancel');
+        stop.addEventListener('click', () => cancelRun(r.id));
+        actions.append(stop);
+      } else if (r.summary) {
+        const show = el('button', 'btn sm ghost', 'Detail');
+        show.addEventListener('click', () => showRunDetail(r));
+        actions.append(show);
+      }
+      tr.append(actions);
       body.append(tr);
     });
     $('runs-updated').textContent = `updated ${new Date().toLocaleTimeString()}`;
+    scheduleRunsRefresh();
   } catch (err) {
-    banner($('runs-error'), 'err', `Could not read run history: ${err.message}`);
+    if (!opts.quiet) {
+      banner($('runs-error'), 'err', `Could not read the queue: ${err.message}`);
+    }
   }
+}
+
+function labelFor(mode) {
+  const found = AUTOMATIONS.find(([, , choice]) => choice === mode);
+  return found ? found[0] : mode;
+}
+
+function showRunDetail(run) {
+  const box = $('run-detail');
+  box.hidden = false;
+  box.innerHTML = '';
+  box.append(el('h4', '', `${labelFor(run.mode)} — ${run.status}`));
+  box.append(el('pre', '', run.summary || 'No output was reported.'));
+  box.append(el('p', 'faint', run.claimed_by
+    ? `The full log is on ${run.claimed_by}, in logs/agent/${run.id}.log`
+    : 'Never started, so there is no log.'));
+}
+
+/* Poll only while something is actually happening, and only while this panel
+   is on screen. An idle dashboard left open all day should cost nothing. */
+function scheduleRunsRefresh() {
+  clearTimeout(RUNS_TIMER);
+  const active = RUN_STATE.runs.some(
+    (r) => r.status === 'queued' || r.status === 'running' || r.status === 'cancelling');
+  const visible = !$('panel-runs').hidden;
+  if (!active || !visible) return;
+  RUNS_TIMER = setTimeout(() => loadRuns({ quiet: true }), 5000);
 }
 
 $('btn-refresh-runs').addEventListener('click', loadRuns);
