@@ -269,6 +269,49 @@ function check(label, ok, detail) {
     check('the live sheet is read for the project you are in',
           mainValue === '3', 'got ' + JSON.stringify(mainValue));
 
+    console.log('\nrunning it locally, and the project actions');
+    await page.click('nav button:has-text("Run locally")');
+    await page.waitForSelector('#panel-setup:not([hidden])');
+    const command = await page.textContent('#setup-cmd');
+    // Built from the page's own config, so a fork cannot leave a stale command.
+    check('the install command names this repository and branch',
+          command.includes('aakashchamola/automated-scraping') && command.includes('install.sh'),
+          command.trim());
+    check('and links to the script so it can be read first',
+          (await page.getAttribute('#setup-read', 'href')).includes('/blob/'),
+          await page.getAttribute('#setup-read', 'href'));
+
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    const actions = await page.$$eval('#project-menu .menu-item', n => n.map(x => x.textContent));
+    check('copy and delete are offered',
+          actions.some(a => /Copy this project/.test(a)) &&
+          actions.some(a => /Delete this project/.test(a)), actions.join(' | '));
+
+    await page.click('#project-menu .menu-item:has-text("Delete this project")');
+    await page.waitForSelector('#delete-project[open]');
+    check('delete is refused until the name is typed', await page.isDisabled('#dp-go'));
+    await page.fill('#dp-name', 'not the right name');
+    check('a wrong name keeps it refused', await page.isDisabled('#dp-go'));
+    await page.fill('#dp-name', await page.textContent('#dp-expected'));
+    check('the exact name enables it', !(await page.isDisabled('#dp-go')));
+    await page.click('#dp-cancel');
+    await page.waitForFunction(() => !document.getElementById('delete-project').open);
+    check('cancelling closes it having deleted nothing', await page.isVisible('#app'));
+
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    await page.click('#project-menu .menu-item:has-text("Copy this project")');
+    await page.waitForSelector('#new-project[open]');
+    check('copy opens the dialog in copy mode',
+          (await page.textContent('#new-project h2')).startsWith('Copy'),
+          await page.textContent('#new-project h2'));
+    check('and hides the adopt-a-spreadsheet section', await page.isHidden('#np-adopt'));
+    check('while offering to bring the results across', await page.isVisible('#np-results-wrap'));
+    await page.click('#np-cancel');
+    await page.waitForFunction(() => !document.getElementById('new-project').open);
+    await page.click('nav button:has-text("Data")');
+
     console.log('\nthe switcher is legible in dark mode');
     // The switcher shipped invisible: its CSS named tokens the page never
     // defined, so the background rendered a light literal fallback while the

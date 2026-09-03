@@ -381,6 +381,16 @@ async function renderSwitcher() {
     make.type = 'button';
     make.addEventListener('click', () => { closeMenu(); openNewProject(); });
     menu.appendChild(make);
+
+    const copy = el('button', 'menu-item', '⧉  Copy this project…');
+    copy.type = 'button';
+    copy.addEventListener('click', () => { closeMenu(); openNewProject({ copy: true }); });
+    menu.appendChild(copy);
+
+    const remove = el('button', 'menu-item danger', '🗑  Delete this project…');
+    remove.type = 'button';
+    remove.addEventListener('click', () => { closeMenu(); openDeleteProject(); });
+    menu.appendChild(remove);
   }
 
   const out = el('button', 'menu-item danger', 'Sign out of this project');
@@ -463,14 +473,32 @@ $('btn-lock').addEventListener('click', async () => {
    As with every other write here, the POST's own answer is unreadable (see the
    Settings section), so success is proved by signing in to the new project. */
 
-function openNewProject() {
+/* Copying reuses this dialog. The two differ only in what the button does and
+   which explanation is shown, so a second near-identical form would be a second
+   place for them to drift apart. */
+let NP_MODE = 'create';
+
+function openNewProject({ copy = false } = {}) {
+  NP_MODE = copy ? 'copy' : 'create';
   const dlg = $('new-project');
   ['np-name', 'np-pw', 'np-sheet', 'np-admin', 'np-email']
     .forEach((id) => { $(id).value = ''; });
+  $('np-results').checked = false;
   $('np-err').textContent = '';
   $('np-done').hidden = true;
   $('np-go').disabled = false;
-  $('np-go').textContent = 'Create project';
+
+  const source = (PROJECT && PROJECT.name) || 'this project';
+  dlg.querySelector('h2').textContent = copy ? `Copy “${source}”` : 'New project';
+  dlg.querySelector('.muted').textContent = copy
+    ? 'A copy of this project\'s spreadsheet becomes a separate project with its '
+      + 'own password. Changing one never affects the other.'
+    : 'A spreadsheet is created in your Drive, given the tabs the automation '
+      + 'expects, and shared with the service account — nothing to set up by hand.';
+  $('np-go').textContent = copy ? 'Copy project' : 'Create project';
+  $('np-adopt').hidden = copy;          // a copy has its source already
+  $('np-results-wrap').hidden = !copy;
+  $('np-copy-note').hidden = !copy;
   // Only ask for an admin password when the service says it wants one.
   jsonp(`${SETTINGS_URL}?ping=1`)
     .then((info) => { $('np-admin-wrap').hidden = !info.adminPasswordConfigured; })
@@ -483,6 +511,7 @@ async function createProject() {
   const password = $('np-pw').value;
   const spreadsheetId = $('np-sheet').value.trim();
   const ownerEmail = $('np-email').value.trim();
+  const copying = NP_MODE === 'copy';
   const adminPassword = $('np-admin').value;
   const err = $('np-err');
   err.textContent = '';
@@ -511,7 +540,7 @@ async function createProject() {
       err.textContent = 'That password already belongs to a project. ' +
                         'Choose a different one.';
       go.disabled = false;
-      go.textContent = 'Create project';
+      go.textContent = copying ? 'Copy project' : 'Create project';
       return;
     }
 
@@ -519,7 +548,10 @@ async function createProject() {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: JSON.stringify(copying ? {
+        action: 'copyProject', token: SESSION_TOKEN,
+        name, password, ownerEmail, includeResults: $('np-results').checked,
+      } : {
         action: 'createProject', token: SESSION_TOKEN,
         name, password, spreadsheetId, adminPassword, ownerEmail,
       }),
@@ -537,8 +569,11 @@ async function createProject() {
     }
 
     if (!auth || !auth.ok) {
-      err.textContent = 'The project was not created. The most likely reasons are ' +
-        'a password another project already uses, or an admin password being required.';
+      err.textContent = copying
+        ? 'The project was not copied. The most likely reason is a password ' +
+          'another project already uses.'
+        : 'The project was not created. The most likely reasons are a password ' +
+          'another project already uses, or an admin password being required.';
       go.disabled = false;
       go.textContent = 'Create project';
       return;
@@ -572,13 +607,103 @@ async function createProject() {
     }
     done.append(el('div', 'hint',
       'Run the pipeline for this project, then unlock it here with its password.'));
-    go.textContent = 'Created';
+    go.textContent = copying ? 'Copied' : 'Created';
   } catch (ex) {
-    err.textContent = `Could not create the project: ${ex.message}`;
+    err.textContent = `Could not ${copying ? 'copy' : 'create'} the project: ${ex.message}`;
     go.disabled = false;
-    go.textContent = 'Create project';
+    go.textContent = copying ? 'Copy project' : 'Create project';
   }
 }
+
+/* ── Deleting a project ───────────────────────────────────────────────────
+   Three separate confirmations, because a session alone proves only that the
+   browser was left open: the name typed out proves the person knows WHICH
+   project this is, and the password proves it is theirs to delete. The
+   spreadsheet is left alone unless they ask, since it is often the only copy
+   of work that took a long time to gather. */
+
+function openDeleteProject() {
+  if (!PROJECT) return;
+  $('dp-expected').textContent = PROJECT.name;
+  $('dp-name').value = '';
+  $('dp-pw').value = '';
+  $('dp-trash').checked = false;
+  $('dp-err').textContent = '';
+  $('dp-go').disabled = true;
+  $('dp-go').textContent = 'Delete project';
+  $('dp-sheet-note').textContent = 'The Google Sheet is left untouched in Drive.';
+  $('delete-project').showModal();
+  $('dp-name').focus();
+}
+
+/* The button stays dead until the name matches — the confirmation should be
+   visible in the UI, not only enforced by the server. */
+function refreshDeleteButton() {
+  const typed = $('dp-name').value.trim().toLowerCase();
+  const expected = ((PROJECT && PROJECT.name) || '').trim().toLowerCase();
+  $('dp-go').disabled = !(typed && typed === expected);
+}
+$('dp-name').addEventListener('input', refreshDeleteButton);
+$('dp-trash').addEventListener('change', () => {
+  $('dp-sheet-note').textContent = $('dp-trash').checked
+    ? "The Google Sheet goes to Drive's bin, recoverable for 30 days."
+    : 'The Google Sheet is left untouched in Drive.';
+});
+
+async function deleteProject() {
+  const err = $('dp-err');
+  const go = $('dp-go');
+  const password = $('dp-pw').value;
+  err.textContent = '';
+  if (!password) { err.textContent = 'Enter this project\'s password.'; return; }
+
+  const doomed = PROJECT.id;
+  go.disabled = true;
+  go.textContent = 'Deleting…';
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'deleteProject', token: SESSION_TOKEN, password,
+        confirm: true, confirmName: $('dp-name').value.trim(),
+        trashSheet: $('dp-trash').checked,
+      }),
+    });
+
+    // The POST's answer is unreadable, so it is proved by the password no
+    // longer opening anything.
+    let gone = false;
+    for (let attempt = 0; attempt < 6 && !gone; attempt++) {
+      await new Promise((r) => setTimeout(r, attempt ? 1500 : 1200));
+      try {
+        const check = await jsonp(
+          `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+        gone = !check.ok;
+      } catch { /* keep waiting */ }
+    }
+
+    if (!gone) {
+      err.textContent = 'The project was not deleted — the password still opens it. ' +
+        'Check the name is typed exactly.';
+      go.disabled = false;
+      go.textContent = 'Delete project';
+      return;
+    }
+
+    await forgetSession(doomed);
+    $('delete-project').close();
+    location.reload();
+  } catch (ex) {
+    err.textContent = `Could not delete the project: ${ex.message}`;
+    go.disabled = false;
+    go.textContent = 'Delete project';
+  }
+}
+
+$('dp-go').addEventListener('click', deleteProject);
+$('dp-cancel').addEventListener('click', () => $('delete-project').close());
 
 $('np-go').addEventListener('click', createProject);
 $('np-cancel').addEventListener('click', () => $('new-project').close());
@@ -1259,6 +1384,43 @@ async function loadRuns() {
 
 $('btn-refresh-runs').addEventListener('click', loadRuns);
 
+/* ── Running it locally ───────────────────────────────────────────────────
+   The install command is built from the repository this page was published
+   from, so a fork or a renamed branch cannot leave a stale command behind for
+   someone to paste. */
+
+function setupCommand() {
+  const repo = CFG.repo || 'aakashchamola/automated-scraping';
+  const branch = CFG.branch || 'main';
+  return `curl -fsSL https://raw.githubusercontent.com/${repo}/${branch}/install.sh | bash`;
+}
+
+function renderSetup() {
+  const command = setupCommand();
+  $('setup-cmd').querySelector('code').textContent = command;
+  const repo = CFG.repo || 'aakashchamola/automated-scraping';
+  const branch = CFG.branch || 'main';
+  $('setup-read').href =
+    `https://github.com/${repo}/blob/${branch}/install.sh`;
+}
+
+$('setup-copy').addEventListener('click', async () => {
+  const button = $('setup-copy');
+  try {
+    await navigator.clipboard.writeText(setupCommand());
+    button.textContent = 'Copied';
+  } catch {
+    // Clipboard access is refused in some contexts; selecting it is still useful.
+    const range = document.createRange();
+    range.selectNodeContents($('setup-cmd'));
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    button.textContent = 'Selected — press ⌘/Ctrl+C';
+  }
+  setTimeout(() => { button.textContent = 'Copy'; }, 2500);
+});
+
 /* ── Tabs & boot ────────────────────────────────────────────────────────── */
 
 document.querySelectorAll('nav button').forEach((btn) => {
@@ -1271,6 +1433,7 @@ document.querySelectorAll('nav button').forEach((btn) => {
     if (btn.dataset.panel === 'panel-runs') loadRuns();
     if (btn.dataset.panel === 'panel-settings') loadSettings();
     if (btn.dataset.panel === 'panel-keywords') loadKeywords();
+    if (btn.dataset.panel === 'panel-setup') renderSetup();
   });
 });
 

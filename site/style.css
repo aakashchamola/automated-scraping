@@ -347,3 +347,47 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
 #new-project .opt { font-weight: 400; color: var(--text-faint); }
 #np-done a { color: inherit; font-weight: 600; }
 #np-done .hint { margin-top: 6px; opacity: .85; }
+
+/* Delete dialog — same shell as the new-project one. */
+#delete-project {
+  width: min(460px, calc(100vw - 32px));
+  padding: 22px; border: 0; border-radius: 14px;
+  box-shadow: var(--shadow), 0 24px 60px rgba(0, 0, 0, .28);
+  color: var(--text); background: var(--surface);
+}
+#delete-project::backdrop { background: rgba(15, 23, 42, .45); }
+#delete-project h2 { margin: 0 0 6px; font-size: 17px; }
+#delete-project label {
+  display: block; margin: 14px 0 5px; font-size: 12.5px; font-weight: 600;
+}
+#delete-project label.switch { display: flex; align-items: center; gap: 8px; }
+#delete-project input[type="text"], #delete-project input[type="password"] {
+  width: 100%; padding: 9px 11px; font: inherit; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); box-sizing: border-box;
+}
+#delete-project .hint { margin: 6px 0 0; font-size: 12px; opacity: .7; }
+#dp-expected { font-family: var(--mono); font-weight: 700; }
+.btn.danger {
+  background: var(--err-soft); color: var(--err); border-color: var(--err);
+}
+.btn.danger:disabled { opacity: .45; cursor: not-allowed; }
+#new-project label.switch {
+  display: flex; align-items: center; gap: 8px; font-weight: 600;
+}
+
+/* Run-locally panel */
+#panel-setup h3 { margin: 22px 0 6px; font-size: 14px; }
+#panel-setup h3:first-of-type { margin-top: 8px; }
+#panel-setup pre {
+  margin: 0; padding: 12px 14px; overflow-x: auto;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-family: var(--mono); font-size: 12.5px;
+}
+#panel-setup code { font-family: var(--mono); }
+#panel-setup p code {
+  padding: 1px 5px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 12.5px;
+}
+#setup-copy { margin-top: 8px; }
+#panel-setup .hint { margin: 8px 0 0; font-size: 12.5px; opacity: .8; }

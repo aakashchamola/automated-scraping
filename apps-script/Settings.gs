@@ -615,6 +615,261 @@ function _organiseFiles() {
   return { folder: folder.getName(), results: results };
 }
 
+/**
+ * Tabs a copy starts empty.
+ *
+ * A copy is for reusing a set-up, not for inheriting somebody else's results —
+ * a new project arriving with several thousand scraped jobs in it would be
+ * wrong, and worse, they would look like its own findings. Which tabs those are
+ * is read from the copy's own Settings, because a project can point its jobs
+ * and enrichment anywhere; the template names are a fallback for a project
+ * whose Settings tab has not been filled in yet.
+ */
+var RESULT_SETTINGS = ['google_sheets.jobs_worksheet',
+                       'google_sheets.enrichment_output_worksheet'];
+var RESULT_TABS_FALLBACK = ['Jobs', 'Companies'];
+
+/** The tab names this spreadsheet treats as automation output. */
+function _resultTabs(spreadsheet) {
+  var names = RESULT_TABS_FALLBACK.slice();
+  var settings = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!settings) return names;
+  var values = settings.getDataRange().getValues();
+  if (!values.length) return names;
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var keyAt = header.indexOf(KEY_COLUMN);
+  var valueAt = header.indexOf(VALUE_COLUMN);
+  if (keyAt < 0 || valueAt < 0) return names;
+  for (var r = 1; r < values.length; r++) {
+    if (RESULT_SETTINGS.indexOf(String(values[r][keyAt]).trim()) === -1) continue;
+    var tab = String(values[r][valueAt]).trim();
+    if (tab && names.indexOf(tab) === -1) names.push(tab);
+  }
+  return names;
+}
+
+/** Empty a tab's data, keeping its header row. */
+function _clearRows(sheet) {
+  var last = sheet.getLastRow();
+  if (last > 1) sheet.deleteRows(2, last - 1);
+}
+
+/**
+ * Copy an existing project into a new one.
+ *
+ * Drive copies the whole spreadsheet in a single call — every tab, its
+ * formatting and its column layout — which is far more faithful than
+ * reconstructing tabs from a template. The scraped results are then emptied,
+ * so what carries over is the set-up: Settings, Keywords, and the
+ * hand-maintained Company list, which is usually the expensive part to rebuild.
+ *
+ * The copy is a project in its own right: its own id, its own password, its own
+ * data key. Nothing links it back to the source, so changing one never affects
+ * the other.
+ */
+function _copyProject(source, body) {
+  var name = String(body.name || '').trim();
+  if (!name) throw new Error('a project name is required');
+  var password = String(body.password || '');
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error('the password must be at least ' + MIN_PASSWORD_LENGTH +
+                    ' characters');
+  }
+  if (_projectByPassword(password)) {
+    throw new Error('another project already uses that password');
+  }
+  if (!source.spreadsheet_id) {
+    throw new Error("project '" + source.id + "' has no spreadsheet to copy");
+  }
+
+  var projectId = _uniqueId(_slugify(body.id || name));
+
+  // Copy straight into the projects folder when one is configured, so the file
+  // is never briefly loose in My Drive.
+  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+  var copy;
+  var filedIn = '';
+  var sourceFile = DriveApp.getFileById(source.spreadsheet_id);
+  if (folderId) {
+    try {
+      var folder = DriveApp.getFolderById(folderId);
+      copy = sourceFile.makeCopy('Automation — ' + name, folder);
+      filedIn = folder.getName();
+    } catch (err) {
+      copy = sourceFile.makeCopy('Automation — ' + name);
+      filedIn = 'could not file it into PROJECTS_FOLDER_ID: ' + err;
+    }
+  } else {
+    copy = sourceFile.makeCopy('Automation — ' + name);
+  }
+
+  var spreadsheetId = copy.getId();
+  var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  _ensureTemplateTabs(spreadsheet);
+
+  var cleared = [];
+  if (!body.includeResults) {
+    _resultTabs(spreadsheet).forEach(function (tabName) {
+      var sheet = spreadsheet.getSheetByName(tabName);
+      if (!sheet) return;
+      var rows = Math.max(0, sheet.getLastRow() - 1);
+      if (rows) {
+        _clearRows(sheet);
+        cleared.push(tabName + ' (' + rows + ' rows)');
+      }
+    });
+  }
+
+  var grantedTo = '';
+  var ownerEmail = String(body.ownerEmail || '').trim();
+  if (ownerEmail) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ownerEmail)) {
+      throw new Error('that does not look like an email address: ' + ownerEmail);
+    }
+    try {
+      copy.addEditor(ownerEmail);
+      grantedTo = ownerEmail;
+    } catch (err) {
+      grantedTo = 'could not share it with ' + ownerEmail + ': ' + err;
+    }
+  }
+
+  // A copy inherits the source's sharing, which would hand the new project to
+  // whoever could read the old one. Drop everyone the copy did not earn.
+  var keep = {};
+  if (_serviceAccount()) keep[_serviceAccount()] = true;
+  // grantedTo holds an error string when the share failed, so compare against
+  // the address that was actually asked for.
+  if (grantedTo && grantedTo === ownerEmail) keep[ownerEmail] = true;
+  copy.getEditors().forEach(function (editor) {
+    var email = editor.getEmail();
+    if (!keep[email]) {
+      try { copy.removeEditor(email); } catch (err) { /* the owner cannot be removed */ }
+    }
+  });
+  copy.getViewers().forEach(function (viewer) {
+    try { copy.removeViewer(viewer.getEmail()); } catch (err) { /* ditto */ }
+  });
+
+  var shared = '';
+  var serviceAccount = _serviceAccount();
+  if (serviceAccount) {
+    try {
+      copy.addEditor(serviceAccount);
+      shared = serviceAccount;
+    } catch (err) {
+      throw new Error('the copy was made but sharing it with ' + serviceAccount +
+        ' failed, so the automation cannot reach it: ' + err);
+    }
+  }
+
+  var salt = _randomKey().substring(0, 32);
+  var record = {
+    id: projectId,
+    name: _plainText(name),
+    spreadsheet_id: spreadsheetId,
+    status: 'active',
+    data_key: _randomKey(),          // its own; the source's must not be reused
+    pw_salt: salt,
+    pw_hash: _hashPassword(password, salt),
+    created_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+    notes: _plainText(String(body.notes || ('copied from ' + source.id)))
+  };
+
+  var control = _controlSheet();
+  var header = control.getRange(1, 1, 1, Math.max(control.getLastColumn(), 1))
+               .getValues()[0].map(function (h) { return String(h).trim(); });
+  control.appendRow(header.map(function (col) {
+    return record.hasOwnProperty(col) ? record[col] : '';
+  }));
+
+  return {
+    project: projectId, name: name, spreadsheetId: spreadsheetId,
+    url: copy.getUrl(), copiedFrom: source.id, filedIn: filedIn,
+    grantedTo: grantedTo, sharedWith: shared,
+    cleared: cleared, keptResults: Boolean(body.includeResults)
+  };
+}
+
+/**
+ * Remove a project from the registry.
+ *
+ * Deliberately not destructive by default. Deleting the row is what makes the
+ * project unreachable — no password opens it, no run finds it — but the
+ * spreadsheet is left alone, because it holds work that took real time to
+ * gather and is very often somebody's only copy. Pass trashSheet to move it to
+ * Drive's bin as well, which is still recoverable for thirty days. Nothing here
+ * deletes anything permanently.
+ *
+ * Three things are required together, and each rules out a different accident:
+ *
+ *   confirm: true      no request arrives here by mistake
+ *   confirmName        the project's own name, typed out — proves the caller
+ *                      knows WHICH project they are deleting, which a session
+ *                      alone does not
+ *   password           the current password, even with a valid token, so a
+ *                      borrowed session cannot destroy someone's project
+ */
+function _deleteProject(project, body) {
+  if (body.confirm !== true) {
+    throw new Error('deleting a project needs confirm:true');
+  }
+  if (!_passwordMatches(project, body.password || '')) {
+    throw new Error("the project's current password is required to delete it");
+  }
+  var typed = String(body.confirmName || '').trim();
+  var actual = String(project.name || '').trim();
+  if (typed.toLowerCase() !== actual.toLowerCase()) {
+    throw new Error('type the project name exactly to confirm: "' + actual + '"');
+  }
+
+  var trashed = false;
+  var trashError = '';
+  if (body.trashSheet === true && project.spreadsheet_id) {
+    try {
+      // Bin, never a hard delete: recoverable for thirty days.
+      DriveApp.getFileById(project.spreadsheet_id).setTrashed(true);
+      trashed = true;
+    } catch (err) {
+      // The row still goes; a sheet that could not be binned is not a reason to
+      // leave the project reachable.
+      trashError = String(err);
+    }
+  }
+
+  // Read the row number fresh. The one on `project` came from a read that may
+  // now be stale, and deleting by a stale index would remove the wrong project.
+  var control = _controlSheet();
+  var values = control.getDataRange().getValues();
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var idAt = header.indexOf('id');
+  if (idAt < 0) throw new Error("the control sheet has no 'id' column");
+
+  var rowNumber = 0;
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][idAt]).trim().toLowerCase() === String(project.id).toLowerCase()) {
+      rowNumber = r + 1;
+      break;
+    }
+  }
+  if (!rowNumber) throw new Error('that project is no longer in the control sheet');
+
+  control.deleteRow(rowNumber);
+  _revokeProjectTokens(project.id);
+
+  return {
+    deleted: project.id, name: actual,
+    spreadsheetId: project.spreadsheet_id,
+    sheetTrashed: trashed,
+    // The sheet outlives the project unless asked otherwise, so say where it is.
+    sheetNote: trashed
+      ? "the spreadsheet is in Drive's bin and recoverable for 30 days"
+      : (trashError
+          ? 'the project is gone, but the spreadsheet could not be binned: ' + trashError
+          : 'the spreadsheet was left untouched in Drive')
+  };
+}
+
 function _createProject(body) {
   var name = String(body.name || '').trim();
   if (!name) throw new Error('a project name is required');
@@ -871,6 +1126,43 @@ function doPost(e) {
       return _json(mayOrganise.ok
         ? (function () { var r = _organiseFiles(); r.ok = true; return r; })()
         : mayOrganise);
+    }
+
+    if (body.action === 'deleteProject') {
+      // Authorised by the project itself: you can only delete what you can
+      // open. The password is demanded again inside, token or not.
+      var doomed = _authorise(body);
+      if (!doomed) {
+        return _json({ ok: false, error: _authError(body), signedOut: true });
+      }
+      var deleteLock = LockService.getScriptLock();
+      deleteLock.waitLock(30000);
+      try {
+        var removed = _deleteProject(doomed, body);
+        removed.ok = true;
+        return _json(removed);
+      } finally {
+        deleteLock.releaseLock();
+      }
+    }
+
+    if (body.action === 'copyProject') {
+      // Authorised by the project being copied, not by an admin: if you can
+      // open it you can already read everything the copy would contain, so
+      // copying grants you nothing you did not have.
+      var sourceProject = _authorise(body);
+      if (!sourceProject) {
+        return _json({ ok: false, error: _authError(body), signedOut: true });
+      }
+      var copyLock = LockService.getScriptLock();
+      copyLock.waitLock(30000);
+      try {
+        var copied = _copyProject(sourceProject, body);
+        copied.ok = true;
+        return _json(copied);
+      } finally {
+        copyLock.releaseLock();
+      }
     }
 
     if (body.action === 'createProject') {

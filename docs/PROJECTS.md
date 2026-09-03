@@ -56,6 +56,44 @@ a single-project setup behaves exactly as it did before there were projects.
 `PROJECT_ID` in the environment does the same thing, which is how the GitHub
 Actions workflow passes its **Project** input down to every step.
 
+## Copying and deleting
+
+Both are done from the project menu, and both are authorised by the project you
+have open — you can only copy or delete what your password already opens.
+
+**Copy** duplicates the spreadsheet through Drive, so every tab, its formatting
+and its columns come across exactly. The scraped results are then emptied, since
+a new project arriving with thousands of somebody else's jobs in it would look
+like its own findings; tick *Also copy the scraped results* to keep them. What
+carries over is the expensive part: settings, keywords and the hand-maintained
+company list. The copy gets its own id, password and data key, and a Drive copy
+inherits the source's sharing, so everyone the copy did not earn is removed from
+it.
+
+**Delete** removes the project from the registry: no password opens it and no
+run finds it. Three things are required together, each ruling out a different
+accident — the project's name typed out, its current password (asked for again
+even with a live session, so a browser left open on a shared machine cannot
+destroy someone's work), and an explicit confirmation. The spreadsheet is left
+untouched in Drive unless you tick the box, and even then it goes to the bin and
+is recoverable for thirty days. Nothing here deletes anything permanently.
+
+## Running it on your own machine
+
+The **Run locally** tab hands out a one-line installer. It clones the
+repository, builds a Python virtual environment, installs the dependencies and
+checks they import — into `~/automated-scraping`, with no admin rights, and safe
+to re-run to update.
+
+Worth doing beyond saving a server: LinkedIn and the ATS APIs answer a
+datacenter address fine, but Indeed and Internshala return a Cloudflare 403 and
+a challenge page. A home connection gets both back, which is why CI drops them
+and a local run does not.
+
+The one thing it cannot install is the service-account key. It is not in the
+repository and should not be — the repository is public, and that key can read
+and write every sheet it has been shared with.
+
 ## Passwords and keys
 
 Two secrets per project, and they are deliberately not the same thing:

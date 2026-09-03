@@ -38,6 +38,7 @@
       <button role="tab" aria-selected="false" data-panel="panel-runs">Runs</button>
       <button role="tab" aria-selected="false" data-panel="panel-keywords">Keywords</button>
       <button role="tab" aria-selected="false" data-panel="panel-settings">Settings</button>
+      <button role="tab" aria-selected="false" data-panel="panel-setup">Run locally</button>
     </nav>
     <span class="spacer"></span>
     <span id="captured" class="pill neutral"></span>
@@ -182,6 +183,43 @@
         </div>
       </div>
     </section>
+
+    <section id="panel-setup" class="panel" hidden>
+      <div class="card">
+        <div class="card-head"><h2>Run it on your own machine</h2></div>
+        <div class="card-body">
+          <p>The scraping can run here rather than on a server. It is usually
+            faster, it costs nothing, and job boards that block datacenter
+            addresses — Indeed and Internshala among them — answer a home
+            connection normally.</p>
+
+          <h3>One command</h3>
+          <p class="muted">macOS or Linux. Installs into <code>~/automated-scraping</code>,
+            needs no admin rights, and is safe to run again to update.</p>
+          <pre id="setup-cmd"><code></code></pre>
+          <button class="btn sm" id="setup-copy">Copy</button>
+          <p class="hint">Piping anything into a shell deserves a look first.
+            <a id="setup-read" target="_blank" rel="noopener">Read the script</a>
+            — it clones the repository, makes a Python virtual environment,
+            installs the dependencies and checks they import.</p>
+
+          <h3>Then start it</h3>
+          <pre><code>cd ~/automated-scraping &amp;&amp; ./start_dashboard.sh</code></pre>
+          <p class="muted">Opens at <code>http://127.0.0.1:5000</code> — the same
+            panels as here, plus a Run tab that streams each task's log live as
+            it goes.</p>
+
+          <h3>One thing it cannot install</h3>
+          <p>The Google service-account key. It is deliberately not in the
+            repository, because the repository is public and that key can read
+            and write every sheet it has been shared with. Ask whoever runs the
+            project for it, and put it at
+            <code>~/automated-scraping/secrets/google-service-account.json</code>.</p>
+          <p class="hint">Without it the dashboard still starts and every screen
+            works; nothing can reach a spreadsheet until it is there.</p>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -206,7 +244,16 @@
       open and edit it in Google Sheets. Only this project's sheet — never
       anyone else's.</p>
 
-    <details>
+    <label class="switch" id="np-results-wrap" hidden>
+      <input type="checkbox" id="np-results">
+      Also copy the scraped results
+    </label>
+    <p class="hint" id="np-copy-note" hidden>
+      Settings, keywords and the company list come across. The scraped results
+      start empty, so the new project's findings are its own.
+    </p>
+
+    <details id="np-adopt">
       <summary>Use a spreadsheet I already have</summary>
       <label for="np-sheet">Spreadsheet ID</label>
       <input type="text" id="np-sheet" placeholder="leave blank to create a new one">
@@ -228,6 +275,36 @@
     <div class="dialog-actions">
       <button type="button" class="btn" id="np-cancel">Cancel</button>
       <button type="button" class="btn primary" id="np-go">Create project</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-project">
+  <form method="dialog">
+    <h2>Delete this project</h2>
+    <p class="muted">It stops existing here: no password will open it and no run
+      will find it. <strong id="dp-sheet-note">The Google Sheet is left
+      untouched in Drive.</strong></p>
+
+    <label for="dp-name">Type <span id="dp-expected" class="mono"></span> to confirm</label>
+    <input type="text" id="dp-name" autocomplete="off" spellcheck="false">
+
+    <label for="dp-pw">This project's password</label>
+    <input type="password" id="dp-pw" autocomplete="current-password">
+    <p class="hint">Asked for again even though you are signed in, so a session
+      left open on a shared machine cannot delete someone's project.</p>
+
+    <label class="switch">
+      <input type="checkbox" id="dp-trash">
+      Also move the spreadsheet to Drive's bin
+    </label>
+    <p class="hint">Recoverable there for 30 days. Left off, the sheet and its
+      data stay exactly where they are.</p>
+
+    <div class="err" id="dp-err"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="dp-cancel">Cancel</button>
+      <button type="button" class="btn danger" id="dp-go" disabled>Delete project</button>
     </div>
   </form>
 </dialog>

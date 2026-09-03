@@ -31,6 +31,8 @@ class FakeSheet {
   setFrozenRows(n) { this.frozen = n; }
   insertRowsAfter(_after, n) { for (let i = 0; i < n; i++) this.rows.push([]); }
   appendRow(values) { this.rows.push(values.slice()); }
+  deleteRows(start, howMany) { this.rows.splice(start - 1, howMany); }
+  deleteRow(n) { this.rows.splice(n - 1, 1); }
   getDataRange() {
     const width = this.getLastColumn();
     return { getValues: () => this.rows.map(r => { const c = r.slice(); while (c.length < width) c.push(''); return c; }) };
@@ -137,6 +139,35 @@ function buildSandbox(world) {
     DriveApp: {
       getFileById: id => ({
         addEditor(email) { (world.editors[id] = world.editors[id] || []).push(email); },
+        removeEditor(email) {
+          world.editors[id] = (world.editors[id] || []).filter(e => e !== email);
+        },
+        getEditors() {
+          return (world.editors[id] || []).map(e => ({ getEmail: () => e }));
+        },
+        getViewers() {
+          return (world.viewers[id] || []).map(e => ({ getEmail: () => e }));
+        },
+        removeViewer(email) {
+          world.viewers[id] = (world.viewers[id] || []).filter(e => e !== email);
+        },
+        setTrashed(flag) {
+          if (world.untrashable.includes(id)) throw new Error('cannot trash it');
+          world.trashed[id] = flag;
+        },
+        getUrl() { return 'https://docs.google.com/spreadsheets/d/' + id; },
+        makeCopy(name, folder) {
+          const copyId = 'copy-' + (++world.created);
+          const source = world.sheets[id];
+          world.sheets[copyId] = new FakeSpreadsheet(copyId,
+            source.getSheets().map(s => new FakeSheet(s.name, s.rows.map(r => r.slice()))));
+          world.names[copyId] = name;
+          // A Drive copy inherits the source's sharing.
+          world.editors[copyId] = (world.editors[id] || []).slice();
+          world.viewers[copyId] = (world.viewers[id] || []).slice();
+          if (folder) folder.addFile({ getId: () => copyId });
+          return sandbox.DriveApp.getFileById(copyId);
+        },
         getId() { return id; },
         getParents() {
           const list = (world.parents[id] || []).map(pid => makeFolder(pid));
@@ -168,7 +199,8 @@ const CONTROL_HEADER = ['id', 'name', 'spreadsheet_id', 'status', 'data_key',
 function makeWorld() {
   const world = { props: {}, sheets: {}, editors: {}, folders: ['folder-1'],
                   filed: [], names: {}, created: 0,
-                  parents: {}, readonlyParents: [] };
+                  parents: {}, readonlyParents: [],
+                  viewers: {}, trashed: {}, untrashable: [] };
 
   const project = (id, jobs) => new FakeSpreadsheet(id, [
     new FakeSheet('Settings', [
@@ -528,6 +560,125 @@ console.log('\nSettings.gs\n');
   control.rows[row][3] = 'archived';
   check('and stops the moment the project is archived',
         get(s, { token: auth.token }).ok === false);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ncopying a project');
+  world.props.PROJECTS_FOLDER_ID = 'folder-1';
+  // Give the source some results and some inherited sharing.
+  const src = world.sheets['sheet-a'];
+  src.getSheetByName('Jobs').rows.push(['Acme', 'Engineer'], ['Beta', 'Analyst']);
+  world.editors['sheet-a'] = ['someone.from.before@example.com'];
+  world.viewers['sheet-a'] = ['a.viewer@example.com'];
+
+  const anon = post(s, { action: 'copyProject', name: 'Nope', password: 'nope-secret-1' });
+  check('a copy needs the source project open', anon.ok === false);
+
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const copy = post(s, { action: 'copyProject', token: auth.token,
+                         name: 'Alpha Clone', password: 'clone-secret-1' });
+  check('it copies', copy.ok === true && copy.copiedFrom === 'alpha', JSON.stringify(copy));
+  check('into the projects folder', /folder-1/.test(copy.filedIn), copy.filedIn);
+  check('the copy is its own project', copy.project === 'alpha-clone');
+
+  const opened = get(s, { action: 'auth', password: 'clone-secret-1' });
+  check('and opens with its own password', opened.ok === true && opened.project === 'alpha-clone');
+  check('with its own data key, not the source\'s',
+        opened.dataKey !== get(s, { action: 'auth', password: 'pw-alpha-secret' }).dataKey);
+
+  const copied = world.sheets[copy.spreadsheetId];
+  check('the configuration comes across',
+        copied.getSheetByName('Settings').rows.length === src.getSheetByName('Settings').rows.length);
+  check('and the keywords', copied.getSheetByName('Keywords').rows.length === 3);
+  // Inheriting several thousand scraped rows would look like the new project's
+  // own findings.
+  check('but the scraped results are emptied',
+        copied.getSheetByName('Jobs').rows.length === 1, JSON.stringify(copy.cleared));
+  check('and it says what it cleared', /Jobs/.test(copy.cleared.join(',')), copy.cleared.join(','));
+
+  // A Drive copy inherits the source's sharing, which would hand the new
+  // project to whoever could read the old one.
+  check('the source\'s editors do not come with it',
+        !(world.editors[copy.spreadsheetId] || []).includes('someone.from.before@example.com'),
+        JSON.stringify(world.editors[copy.spreadsheetId]));
+  check('nor its viewers',
+        !(world.viewers[copy.spreadsheetId] || []).includes('a.viewer@example.com'),
+        JSON.stringify(world.viewers[copy.spreadsheetId]));
+  check('but the service account is kept',
+        (world.editors[copy.spreadsheetId] || []).includes('bot@example.iam.gserviceaccount.com'));
+
+  const kept = post(s, { action: 'copyProject', token: auth.token, name: 'With Results',
+                         password: 'withresults-1', includeResults: true });
+  check('results can be kept on request',
+        world.sheets[kept.spreadsheetId].getSheetByName('Jobs').rows.length === 3,
+        String(world.sheets[kept.spreadsheetId].getSheetByName('Jobs').rows.length));
+
+  const dup = post(s, { action: 'copyProject', token: auth.token, name: 'Dup',
+                        password: 'pw-beta-secret' });
+  check('a password another project uses is refused', dup.ok === false);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ndeleting a project');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const before = _projectCount(world);
+
+  const noConfirm = post(s, { action: 'deleteProject', token: auth.token,
+                              password: 'pw-alpha-secret', confirmName: 'Alpha Ltd' });
+  check('confirm:true is required', noConfirm.ok === false && /confirm/.test(noConfirm.error));
+
+  const noName = post(s, { action: 'deleteProject', token: auth.token, confirm: true,
+                           password: 'pw-alpha-secret', confirmName: 'wrong name' });
+  check('the name must be typed exactly',
+        noName.ok === false && /type the project name/.test(noName.error), noName.error);
+
+  // A borrowed session must not be able to destroy someone's project.
+  const noPassword = post(s, { action: 'deleteProject', token: auth.token, confirm: true,
+                               confirmName: 'Alpha Ltd' });
+  check('the password is required even with a valid token',
+        noPassword.ok === false && /password/.test(noPassword.error), noPassword.error);
+  check('nothing was deleted by any of those', _projectCount(world) === before);
+
+  const gone = post(s, { action: 'deleteProject', token: auth.token, confirm: true,
+                         password: 'pw-alpha-secret', confirmName: 'alpha ltd' });
+  check('with all three it deletes', gone.ok === true && gone.deleted === 'alpha',
+        JSON.stringify(gone));
+  check('the row is removed', _projectCount(world) === before - 1);
+  check('its password no longer opens anything',
+        get(s, { action: 'auth', password: 'pw-alpha-secret' }).ok === false);
+  check('and its session is dead', get(s, { token: auth.token }).ok === false);
+
+  // The sheet is very often somebody's only copy of that work.
+  check('the spreadsheet is left alone by default',
+        world.trashed['sheet-a'] !== true && /left untouched/.test(gone.sheetNote),
+        gone.sheetNote);
+  check('the other project is untouched',
+        get(s, { action: 'auth', password: 'pw-beta-secret' }).ok === true);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ndeleting, and binning the sheet too');
+  const auth = get(s, { action: 'auth', password: 'pw-beta-secret' });
+  const gone = post(s, { action: 'deleteProject', token: auth.token, confirm: true,
+                         password: 'pw-beta-secret', confirmName: 'Beta Corp',
+                         trashSheet: true });
+  check('the sheet goes to the bin when asked',
+        gone.ok === true && world.trashed['sheet-b'] === true);
+  check('and it says it is recoverable', /30 days/.test(gone.sheetNote), gone.sheetNote);
+
+  // A sheet that cannot be binned is no reason to leave the project reachable.
+  const world2 = makeWorld(); const s2 = buildSandbox(world2); seedProjects(s2, world2);
+  world2.untrashable.push('sheet-a');
+  const auth2 = get(s2, { action: 'auth', password: 'pw-alpha-secret' });
+  const partial = post(s2, { action: 'deleteProject', token: auth2.token, confirm: true,
+                             password: 'pw-alpha-secret', confirmName: 'Alpha Ltd',
+                             trashSheet: true });
+  check('the project still goes when the sheet cannot be binned',
+        partial.ok === true && partial.sheetTrashed === false, JSON.stringify(partial));
+  check('and it says why', /could not be binned/.test(partial.sheetNote), partial.sheetNote);
 }
 
 {
