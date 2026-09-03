@@ -182,8 +182,10 @@ def apply_from_sheet(config: dict, store=None, worksheet: str = WORKSHEET) -> li
     """Read the tab and apply it to *config* in place. Never raises."""
     try:
         if store is None:
-            from google_sheets_store import GoogleSheetsStore
-            store = GoogleSheetsStore(config["google_sheets"])
+            # The Web App when this machine has a project password and no
+            # Google key; the Sheets API when it has the key.
+            import remote_store
+            store = remote_store.store_for(config)
         overrides, problems = read_overrides(store, worksheet)
     except Exception as exc:
         logger.warning(f"could not read '{worksheet}': {type(exc).__name__}: {exc} "

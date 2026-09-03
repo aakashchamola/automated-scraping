@@ -564,6 +564,108 @@ console.log('\nSettings.gs\n');
 
 {
   const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nhanding the pipeline its inputs');
+  const sheet = world.sheets['sheet-a'];
+  sheet.getSheetByName('Jobs').name = 'Jobs';
+  sheet.sheets.push(new FakeSheet('Jobs_Test', [
+    ['Company', 'Role', 'Job Link'],
+    ['Acme', 'Microbiologist', 'https://example.com/job/1'],
+    ['Beta', 'Analyst', 'https://example.com/job/2'],
+  ]));
+  sheet.sheets.push(new FakeSheet('Company', [
+    ['Company', 'Linkedin-Url'],
+    ['Acme', 'https://linkedin.com/company/acme'],
+    ['NoUrl', ''],
+  ]));
+
+  const anon = get(s, { action: 'inputs' });
+  check('inputs need a password', anon.ok === false);
+
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const inputs = get(s, { action: 'inputs', token: auth.token });
+  check('it answers for the right project', inputs.ok === true && inputs.project === 'alpha');
+  check('the jobs tab is read from that project\'s settings',
+        inputs.jobsWorksheet === 'Jobs_Test', inputs.jobsWorksheet);
+  check('keywords come across', inputs.keywords.join() === 'data analyst,ml engineer',
+        inputs.keywords.join());
+  check('the settings tab comes across whole',
+        inputs.settingsRows.length === 4 && inputs.settingsRows[0][1] === 'Setting',
+        String(inputs.settingsRows.length));
+  check('every settings cell is a string',
+        inputs.settingsRows.every(r => r.every(c => typeof c === 'string')));
+  check('the company map skips rows with no url',
+        Object.keys(inputs.companyLinkedIn).join() === 'acme',
+        Object.keys(inputs.companyLinkedIn).join());
+
+  // The machine running the pipeline must not be handed the jobs already
+  // collected — only enough to skip them.
+  check('already-seen links come back as hashes', inputs.existingLinkHashes.length === 2);
+  check('and not as URLs', !JSON.stringify(inputs.existingLinkHashes).includes('example.com'),
+        JSON.stringify(inputs.existingLinkHashes));
+  check('nor does anything else leak the sheet id',
+        !JSON.stringify(inputs).includes('sheet-a'));
+
+  const crossed = get(s, { action: 'inputs', token: auth.token, project: 'beta' });
+  check('a session cannot ask for another project\'s inputs', crossed.ok === false);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\ntaking the results back');
+  const sheet = world.sheets['sheet-a'];
+  sheet.sheets.push(new FakeSheet('Jobs_Test', [
+    ['Company', 'Role', 'Job Link'],
+    ['Old', 'Analyst', 'https://example.com/job/1'],
+  ]));
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+  const jobs = () => world.sheets['sheet-a'].getSheetByName('Jobs_Test');
+
+  const anon = post(s, { action: 'appendJobs', rows: [{ Company: 'X' }] });
+  check('appending needs a password', anon.ok === false);
+
+  const added = post(s, { action: 'appendJobs', token: auth.token, worksheet: 'Jobs_Test',
+    rows: [{ Company: 'New', Role: 'Scientist', 'Job Link': 'https://example.com/job/9' }] });
+  check('a new row is written', added.ok === true && added.added === 1, JSON.stringify(added));
+  check('into the right tab', jobs().rows.length === 3, String(jobs().rows.length));
+  check('aligned to the tab\'s own header',
+        jobs().rows[2][0] === 'New' && jobs().rows[2][2] === 'https://example.com/job/9',
+        JSON.stringify(jobs().rows[2]));
+
+  // The caller's idea of what exists is a snapshot from the start of a run that
+  // may have taken an hour, so this is the check that can see the sheet now.
+  const dupe = post(s, { action: 'appendJobs', token: auth.token, worksheet: 'Jobs_Test',
+    rows: [{ Company: 'Old again', 'Job Link': 'https://example.com/job/1' }] });
+  check('a link already in the sheet is skipped',
+        dupe.added === 0 && dupe.duplicates === 1, JSON.stringify(dupe));
+  check('and the sheet did not grow', jobs().rows.length === 3);
+
+  const within = post(s, { action: 'appendJobs', token: auth.token, worksheet: 'Jobs_Test',
+    rows: [{ Company: 'A', 'Job Link': 'https://example.com/dup' },
+           { Company: 'B', 'Job Link': 'https://example.com/dup' }] });
+  check('duplicates inside one batch are caught too',
+        within.added === 1 && within.duplicates === 1, JSON.stringify(within));
+
+  // A sheet with extra or reordered columns must be filled, not shifted.
+  jobs().rows[0] = ['Job Link', 'Company', 'Role', 'Keyword'];
+  const reordered = post(s, { action: 'appendJobs', token: auth.token, worksheet: 'Jobs_Test',
+    rows: [{ Company: 'Ordered', Role: 'Chemist', 'Job Link': 'https://example.com/o',
+             Keyword: 'chemistry' }] });
+  const last = jobs().rows[jobs().rows.length - 1];
+  check('a reordered header is respected',
+        reordered.ok === true && last[0] === 'https://example.com/o' && last[1] === 'Ordered',
+        JSON.stringify(last));
+
+  const missing = post(s, { action: 'appendJobs', token: auth.token,
+                            worksheet: 'NoSuchTab', rows: [{ Company: 'X' }] });
+  check('a missing tab is an error, not a silent no-op', missing.ok === false, missing.error);
+
+  const none = post(s, { action: 'appendJobs', token: auth.token, worksheet: 'Jobs_Test',
+                         rows: [] });
+  check('an empty batch is harmless', none.ok === true && none.added === 0);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
   console.log('\ncopying a project');
   world.props.PROJECTS_FOLDER_ID = 'folder-1';
   // Give the source some results and some inherited sharing.

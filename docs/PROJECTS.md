@@ -90,9 +90,44 @@ datacenter address fine, but Indeed and Internshala return a Cloudflare 403 and
 a challenge page. A home connection gets both back, which is why CI drops them
 and a local run does not.
 
-The one thing it cannot install is the service-account key. It is not in the
-repository and should not be — the repository is public, and that key can read
-and write every sheet it has been shared with.
+### It needs a password, not a key
+
+The machine running the pipeline needs **no Google credentials at all**:
+
+```bash
+export SETTINGS_WEB_APP_URL='https://script.google.com/macros/s/…/exec'
+export PROJECT_PASSWORD='the project password'
+python main.py --config config.yaml
+```
+
+The scraping itself never needed credentials — `scrapers/` contains no
+reference to any. It needed three things: the keywords to search for, the
+settings to obey, and somewhere to put what it finds. All three go through the
+Apps Script, which does the reading and writing as the sheet's owner.
+
+That matters because a service-account key **cannot be scoped to one project**.
+It can read and write every spreadsheet it has ever been shared with, so
+handing it to someone to run a scrape gives them everything. A password reaches
+one project, and it can be changed from the dashboard.
+
+| | The service account | A project password |
+|---|---|---|
+| reaches | every sheet shared with it | one project |
+| revoked by | rotating the key everywhere | changing that password |
+| safe to hand out | no | yes |
+
+What crosses the wire is deliberately narrow. Jobs already collected come back
+as short hashes rather than URLs — enough to skip a duplicate, and nothing
+more. The spreadsheet id never leaves at all, so the machine cannot open the
+sheet even if it wanted to.
+
+Results are deduplicated twice: by the caller against its snapshot, and again
+by the script against the live sheet. Only the second can see rows another
+machine added while the run was going, and a run can take an hour.
+
+With `secrets/google-service-account.json` present the pipeline uses it
+directly instead, so nothing about running this on the owner's own machine
+changes.
 
 ## Passwords and keys
 

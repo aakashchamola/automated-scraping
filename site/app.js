@@ -1402,6 +1402,12 @@ function renderSetup() {
   const branch = CFG.branch || 'main';
   $('setup-read').href =
     `https://github.com/${repo}/blob/${branch}/install.sh`;
+  // The real URL, so nobody has to be told it separately.
+  const exec = $('setup-exec');
+  if (exec) {
+    exec.textContent = SETTINGS_URL ||
+      'ask whoever runs the project for the /exec URL';
+  }
 }
 
 $('setup-copy').addEventListener('click', async () => {

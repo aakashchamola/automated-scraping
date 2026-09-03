@@ -19,6 +19,7 @@ import pandas as pd
 
 import storage
 import projects_registry
+import remote_store
 from config_loader import load_config
 from google_sheets_store import GoogleSheetsStore
 from scrapers.glassdoor import GlassdoorScraper
@@ -110,7 +111,7 @@ def resolve_keywords(config: dict) -> list:
     if src.get("mode") == "sheet":
         worksheet = src.get("worksheet", "Keywords")
         column = src.get("column", "Search Term")
-        store = GoogleSheetsStore(config.get("google_sheets", {}))
+        store = remote_store.store_for(config)
         try:
             keywords = store.load_column_values(column, worksheet)
         except Exception as exc:
@@ -189,7 +190,10 @@ def run(config: dict) -> None:
     new_df = pd.DataFrame(all_new_jobs)
     existing_csv_df = storage.load_existing(output_csv)
 
-    sheet_store = GoogleSheetsStore(config.get("google_sheets", {}))
+    # Which store this is depends on how the machine is set up: the Web App
+    # when it has a project password and no Google key, the Sheets API when it
+    # has the key. Nothing below can tell the difference.
+    sheet_store = remote_store.store_for(config)
     existing_sheet_df = pd.DataFrame(columns=storage.OUTPUT_COLUMNS)
     if sheet_store.is_enabled():
         try:

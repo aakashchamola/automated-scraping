@@ -92,13 +92,32 @@ bold "Start it with:"
 printf '   cd %s && ./start_dashboard.sh\n' "$TARGET"
 printf '   then open http://127.0.0.1:5000\n\n'
 
-if [ ! -f secrets/google-service-account.json ]; then
-    warn "One thing is still needed: Google credentials."
-    printf '   The dashboard runs without them, but nothing can read or write a\n'
-    printf '   spreadsheet until a service-account key is at:\n\n'
-    printf '     %s/secrets/google-service-account.json\n\n' "$TARGET"
-    printf '   Ask whoever runs the project for it — it is not in this repository,\n'
-    printf '   and it should not be: the repository is public.\n\n'
-else
-    ok "Google credentials are already in place"
+if [ -f secrets/google-service-account.json ]; then
+    ok "Google credentials are in place — the pipeline will use them directly"
+    exit 0
 fi
+
+cat <<'NOTE'
+
+One more thing, and it is just a password.
+
+  The pipeline needs somewhere to read its keywords and settings from, and
+  somewhere to put what it finds. It gets both from the project's web service,
+  which means this machine needs NO Google credentials at all — only the
+  password you already use to open the dashboard.
+
+  Put these two in your shell (or in a .env file beside this script):
+
+    export SETTINGS_WEB_APP_URL='<the /exec URL from whoever runs the project>'
+    export PROJECT_PASSWORD='<your project password>'
+
+  Then run the pipeline as normal:
+
+    ./.venv/bin/python main.py --config config.yaml
+
+  There is deliberately no service-account key to hand out: one key can read
+  and write every spreadsheet it has ever been shared with, and there is no way
+  to narrow it to a single project. A password reaches one project and nothing
+  else, and it can be changed from the dashboard whenever you like.
+
+NOTE

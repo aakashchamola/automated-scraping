@@ -445,6 +445,187 @@ function _writeKeywords(project, list) {
 }
 
 
+/* ── Running the pipeline somewhere else ────────────────────────────────────
+   The scraping does not need Google credentials — it needs the keywords to
+   search for, the settings to obey, and somewhere to put what it finds. Those
+   three things can be handed over and taken back through here, which means a
+   machine running the pipeline holds nothing but the project's password.
+
+   The alternative is passing out the service-account key, and that key can
+   read and write every sheet it has ever been shared with. There is no way to
+   scope it to one project, so it can never leave the owner.
+
+   Unlike the dashboard, the caller here is a program rather than a browser, so
+   none of the CORS rules above apply: it can POST and read the reply directly.
+   That is why these two actions are ordinary request/response.                */
+
+var LINK_HASH_CHARS = 12;   // 48 bits; collisions across a few thousand are nil
+
+/** One setting's value from a project's Settings tab, or a default. */
+function _settingValue(rows, key, fallback) {
+  if (!rows || !rows.length) return fallback;
+  var header = rows[0].map(function (h) { return String(h).trim(); });
+  var keyAt = header.indexOf(KEY_COLUMN);
+  var valueAt = header.indexOf(VALUE_COLUMN);
+  if (keyAt < 0 || valueAt < 0) return fallback;
+  for (var r = 1; r < rows.length; r++) {
+    if (String(rows[r][keyAt]).trim() === key) {
+      var value = String(rows[r][valueAt]).trim();
+      if (value) return value;
+    }
+  }
+  return fallback;
+}
+
+/** A column's values from a tab, by header name. */
+function _columnValues(sheet, headerName) {
+  if (!sheet) return [];
+  var values = sheet.getDataRange().getValues();
+  if (values.length < 2) return [];
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var at = header.indexOf(headerName);
+  if (at < 0) return [];
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    out.push(String(values[r][at] == null ? '' : values[r][at]).trim());
+  }
+  return out;
+}
+
+function _linkHash(url) {
+  return _sha256Hex(String(url || '').trim()).substring(0, LINK_HASH_CHARS);
+}
+
+/**
+ * Everything the pipeline needs to read, in one round trip.
+ *
+ * Already-seen job links come back as short hashes rather than URLs: it is all
+ * the caller needs in order to skip duplicates, it keeps the response small,
+ * and it means a machine running the pipeline never receives the list of jobs
+ * already collected.
+ */
+function _pipelineInputs(project) {
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+
+  var settingsSheet = spreadsheet.getSheetByName(SHEET_NAME);
+  var settingsRows = settingsSheet ? settingsSheet.getDataRange().getValues() : [];
+  // Dates and numbers would arrive as objects the caller cannot use.
+  settingsRows = settingsRows.map(function (row) {
+    return row.map(function (cell) { return String(cell == null ? '' : cell); });
+  });
+
+  var jobsTab = _settingValue(settingsRows, 'google_sheets.jobs_worksheet', 'Jobs');
+  var companyTab = _settingValue(settingsRows,
+    'google_sheets.company_sheet.worksheet', 'Company');
+  var companyCol = _settingValue(settingsRows,
+    'google_sheets.company_sheet.company_column', 'Company');
+  var linkedinCol = _settingValue(settingsRows,
+    'google_sheets.company_sheet.linkedin_url_column', 'Linkedin-Url');
+
+  var jobsSheet = spreadsheet.getSheetByName(jobsTab);
+  var jobsHeader = [];
+  var existing = [];
+  if (jobsSheet) {
+    var jobsValues = jobsSheet.getDataRange().getValues();
+    if (jobsValues.length) {
+      jobsHeader = jobsValues[0].map(function (h) { return String(h).trim(); })
+        .filter(String);
+      var linkAt = jobsValues[0].map(function (h) { return String(h).trim(); })
+        .indexOf('Job Link');
+      if (linkAt >= 0) {
+        for (var r = 1; r < jobsValues.length; r++) {
+          var url = String(jobsValues[r][linkAt] || '').trim();
+          if (url) existing.push(_linkHash(url));
+        }
+      }
+    }
+  }
+
+  var companySheet = spreadsheet.getSheetByName(companyTab);
+  var names = _columnValues(companySheet, companyCol);
+  var urls = _columnValues(companySheet, linkedinCol);
+  var companyLinkedIn = {};
+  for (var i = 0; i < names.length; i++) {
+    if (names[i] && urls[i]) companyLinkedIn[names[i].toLowerCase()] = urls[i];
+  }
+
+  return {
+    project: project.id,
+    settingsRows: settingsRows,
+    keywords: _readKeywords(project).keywords,
+    jobsWorksheet: jobsTab,
+    jobsHeader: jobsHeader,
+    existingLinkHashes: existing,
+    linkHashChars: LINK_HASH_CHARS,
+    companyLinkedIn: companyLinkedIn
+  };
+}
+
+/**
+ * Append scraped rows to a project's jobs tab.
+ *
+ * Deduplicated here as well as by the caller. The caller's copy of what already
+ * exists is a snapshot from the start of a run that may have taken an hour, so
+ * this is the only check that can see the sheet as it is now — and it is the
+ * one that matters, since two machines can be running at once.
+ *
+ * Rows arrive as objects keyed by column name and are aligned to whatever
+ * header the tab actually has, so a sheet with extra or reordered columns is
+ * filled correctly rather than shifted.
+ */
+function _appendJobs(project, body) {
+  var rows = body.rows || [];
+  if (!rows.length) return { added: 0, skipped: 0, duplicates: 0 };
+
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var settingsSheet = spreadsheet.getSheetByName(SHEET_NAME);
+  var settingsRows = settingsSheet ? settingsSheet.getDataRange().getValues() : [];
+  var jobsTab = String(body.worksheet || '').trim() ||
+                _settingValue(settingsRows, 'google_sheets.jobs_worksheet', 'Jobs');
+
+  var sheet = spreadsheet.getSheetByName(jobsTab);
+  if (!sheet) throw new Error("no '" + jobsTab + "' tab in this project's spreadsheet");
+
+  var values = sheet.getDataRange().getValues();
+  var header = (values[0] || []).map(function (h) { return String(h).trim(); });
+  if (!header.filter(String).length) {
+    throw new Error("'" + jobsTab + "' has no header row");
+  }
+  var linkAt = header.indexOf('Job Link');
+
+  var seen = {};
+  if (linkAt >= 0) {
+    for (var r = 1; r < values.length; r++) {
+      var url = String(values[r][linkAt] || '').trim();
+      if (url) seen[url] = true;
+    }
+  }
+
+  var toAppend = [];
+  var duplicates = 0;
+  rows.forEach(function (record) {
+    var link = String(record['Job Link'] || '').trim();
+    if (link && seen[link]) { duplicates++; return; }
+    if (link) seen[link] = true;          // also within this batch
+    toAppend.push(header.map(function (column) {
+      var cell = record[column];
+      return cell == null ? '' : String(cell);
+    }));
+  });
+
+  if (toAppend.length) {
+    // One write for the batch. Appending row by row would spend an API call
+    // each and meet the per-minute write quota within a few hundred rows.
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, header.length)
+         .setValues(toAppend);
+  }
+
+  return {
+    worksheet: jobsTab, added: toAppend.length, duplicates: duplicates,
+    received: rows.length, total: sheet.getLastRow() - 1
+  };
+}
+
 /* ── Creating a project ─────────────────────────────────────────────────────
    Everything a new project needs, in one call: the spreadsheet, its tabs, the
    service account's editor grant, and the registry row. Nothing is left for
@@ -1091,6 +1272,11 @@ function doGet(e) {
       } else if (action === 'keywords') {
         payload = { ok: true, project: authed.id, keywords: _readKeywords(authed),
                     readAt: new Date().toISOString() };
+      } else if (action === 'inputs') {
+        // Everything the pipeline needs to read, so a machine running it holds
+        // no Google credentials at all.
+        payload = _pipelineInputs(authed);
+        payload.ok = true;
       } else if (action === 'project') {
         payload = { ok: true, project: authed.id, name: authed.name,
                     spreadsheetId: authed.spreadsheet_id,
@@ -1218,7 +1404,9 @@ function doPost(e) {
       var writeLock = LockService.getScriptLock();
       writeLock.waitLock(20000);
       try {
-        if (body.action === 'saveKeywords') {
+        if (body.action === 'appendJobs') {
+          result = _appendJobs(project, body);
+        } else if (body.action === 'saveKeywords') {
           result = _writeKeywords(project, body.keywords || []);
         } else {
           result = _applyUpdates(project, body.updates || {});
