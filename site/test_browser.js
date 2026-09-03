@@ -108,6 +108,17 @@ function startStub() {
       return;
     }
     const p = url.searchParams;
+    // Deliberately slow, so a timeout can be made to fire before the reply
+    // arrives — which is the only way to reproduce a late JSONP callback.
+    const delay = Number(p.get('delay') || 0);
+    if (delay > 0) {
+      const cb = p.get('callback') || 'callback';
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'text/javascript' });
+        res.end(`${cb}({"ok":true,"slow":true});`);
+      }, delay);
+      return;
+    }
     let payload;
     if (p.get('ping')) {
       payload = { ok: true, version: 4, standalone: true, activeProjects: 2,
@@ -311,6 +322,26 @@ function check(label, ok, detail) {
     await page.click('#np-cancel');
     await page.waitForFunction(() => !document.getElementById('new-project').open);
     await page.click('nav button:has-text("Data")');
+
+    console.log('\na reply that arrives after the timeout');
+    // Removing the script tag does not cancel the request, so a slow reply
+    // still runs its callback. Deleting the name on timeout turned that into an
+    // uncaught ReferenceError — seen on the live site, not in any stub.
+    const beforeSlow = errors.length;
+    const timedOut = await page.evaluate(async () => {
+      try {
+        // The stub takes 2s; give up after 200ms. The reply lands afterwards.
+        await jsonp(`${window.DASHBOARD_CONFIG.settingsWebApp}?delay=2000`, 200);
+        return false;
+      } catch {
+        return true;      // the timeout is expected
+      }
+    });
+    check('the request does time out first', timedOut);
+    await page.waitForTimeout(3500);   // long enough for the reply to land
+    check('a late reply does not throw an uncaught error',
+          errors.length === beforeSlow,
+          errors.slice(beforeSlow).join('\n       '));
 
     console.log('\nthe switcher is legible in dark mode');
     // The switcher shipped invisible: its CSS named tokens the page never

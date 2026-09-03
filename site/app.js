@@ -948,16 +948,33 @@ const SETTINGS_URL = (CFG.settingsWebApp || '').trim();
 let SETTINGS_ROWS = null;
 const pending = {};
 
-function jsonp(url, timeoutMs = 15000) {
+/* Apps Script can take a long time to answer — it opens a spreadsheet to do it
+   — so this waits a while before giving up. */
+function jsonp(url, timeoutMs = 45000) {
   return new Promise((resolve, reject) => {
     const name = `__jsonp_${Math.random().toString(36).slice(2)}`;
     const script = document.createElement('script');
+    let settled = false;
+
+    /* Removing the script tag does NOT cancel the request. A slow reply still
+       arrives and still runs `__jsonp_xxx({…})`, so deleting the name on
+       timeout turned every slow response into an uncaught ReferenceError with
+       no obvious cause. A no-op is left in its place instead, and cleaned up
+       later once nothing can still be in flight. */
+    const retire = () => {
+      window[name] = () => {};
+      setTimeout(() => { delete window[name]; }, 120000);
+    };
+
     const done = (fn) => {
-      delete window[name];
-      script.remove();
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      script.remove();
+      retire();
       fn();
     };
+
     const timer = setTimeout(
       () => done(() => reject(new Error('the Settings service did not respond'))), timeoutMs);
     window[name] = (payload) => done(() => resolve(payload));
