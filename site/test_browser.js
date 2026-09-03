@@ -91,6 +91,28 @@ function buildSite(root) {
 const STUB_PORT = 8788;
 const SITE_PORT = 8787;
 
+/* What each project's spreadsheet contains, as the service would serve it —
+   raw rows, header first. The encrypted files are built from the same fixture,
+   so a test can tell the live path from the snapshot path by content. */
+function tabsFor(id) {
+  return {
+    Jobs: [
+      ['Company', 'Role', 'Platform'],
+      [PROJECTS[id].name + ' Co', 'Data Analyst', 'linkedin'],
+      ['Second ' + id, 'ML Engineer', 'greenhouse'],
+    ],
+    Settings: [
+      ['Group', 'Setting', 'Value', 'Type'],
+      ['Scraping', 'scraping.max_pages', id === 'main' ? '3' : '7', 'int'],
+    ],
+  };
+}
+
+/* Flipped to false to play a deployment made before `tabs` existed. It answers
+   the action it does not know with a settings read, which is what the real one
+   used to do. */
+let STUB_KNOWS_TABS = true;
+
 // The queue the dashboard drives. Per project, because a run belongs to one.
 const QUEUES = { main: [], biotech: [] };
 const AGENTS = { main: { online: false, everSeen: false },
@@ -156,7 +178,17 @@ function startStub() {
       const id = (p.get('token') || '').replace('token-', '');
       const spec = PROJECTS[id];
       if (!spec) payload = { ok: false, error: 'no project matched that password', signedOut: true };
-      else if (p.get('action') === 'runs') {
+      else if (p.get('action') === 'tabs' && STUB_KNOWS_TABS) {
+        const tabs = tabsFor(id);
+        payload = { ok: true, project: id, capturedAt: new Date().toISOString(),
+                    spreadsheetId: 'sheet-' + id,
+                    worksheets: Object.entries(tabs).map(([name, rows]) => ({
+                      name, row_count: rows.length - 1, columns: rows[0] })) };
+      } else if (p.get('action') === 'rows') {
+        const want = p.get('worksheet') || '';
+        payload = { ok: true, project: id, worksheet: want,
+                    rows: tabsFor(id)[want] || [] };
+      } else if (p.get('action') === 'runs') {
         payload = { ok: true, project: id, runs: QUEUES[id] || [],
                     agent: AGENTS[id] || { online: false, everSeen: false },
                     onlineWithinSec: 90 };
@@ -429,6 +461,51 @@ function check(label, ok, detail) {
     await page.reload();
     await page.waitForSelector('#gate:not([hidden])');
     check('and it stays locked after a reload', await page.isHidden('#app'));
+
+    console.log('\nthe data is what the sheet says now, not the last publish');
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('main-password-1');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    check('the freshness chip says it is live',
+          /live from the sheet/i.test(await page.textContent('#captured')),
+          await page.textContent('#captured'));
+
+    // The published files are a snapshot a CI job used to write. With them
+    // unreachable the dashboard must be entirely unaffected, because it is not
+    // reading them any more.
+    await page.route('**/data/**', route => route.abort());
+    await page.reload();
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    await page.waitForFunction(
+      () => document.getElementById('data-body').textContent.includes('LinkedIn Reachout Co'),
+      null, { timeout: 20000 });
+    check('with no published files at all, the data still loads',
+          (await page.textContent('#data-body')).includes('ML Engineer'));
+    check('and it is still marked live',
+          /live from the sheet/i.test(await page.textContent('#captured')));
+    await page.unroute('**/data/**');
+
+    // The other direction: a deployment that cannot serve tabs must fall back
+    // to the snapshot rather than showing an empty dashboard. An older one
+    // answers an action it does not know by reading Settings instead — a valid
+    // reply to a different question, which is exactly what makes it dangerous.
+    STUB_KNOWS_TABS = false;
+    await page.reload();
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    await page.waitForFunction(
+      () => document.getElementById('data-body').textContent.includes('LinkedIn Reachout Co'),
+      null, { timeout: 20000 });
+    check('an older deployment falls back to the published snapshot',
+          /data from/i.test(await page.textContent('#captured')),
+          await page.textContent('#captured'));
+    check('and says it is a snapshot rather than implying it is current',
+          /last export/i.test(await page.getAttribute('#captured', 'title') || ''),
+          await page.getAttribute('#captured', 'title'));
+    STUB_KNOWS_TABS = true;
+
+    await page.click('#btn-lock');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
 
     console.log('\nstarting a run on your own machine');
     await page.goto(URL_);

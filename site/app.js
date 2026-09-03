@@ -174,6 +174,86 @@ async function fetchEncrypted(name, key) {
   return decryptWith(key, await fetchPayload(name));
 }
 
+/* ── Reading the sheet as it is now ───────────────────────────────────────
+   The published files above are a snapshot: a scheduled job exported every
+   tab, encrypted it, and committed it. That made the dashboard fast and it
+   made it WRONG between runs — it showed whatever the last successful publish
+   contained, and it could only stay current while a CI runner kept publishing.
+
+   Now that the service can serve a tab directly, the page reads what the
+   spreadsheet says at the moment you look. The snapshot is kept as a fallback
+   for a project that still has published files and no reachable service, but
+   live is preferred: stale data presented as current is worse than slow.
+
+   The shapes below match export_snapshot.py exactly, so everything downstream
+   — the table, the facets, the CSV export — cannot tell where a payload came
+   from. */
+
+const HYPERLINK = /^=HYPERLINK\(\s*"((?:[^"]|"")*)"\s*[,;]\s*"((?:[^"]|"")*)"\s*\)$/i;
+
+/* A HYPERLINK formula split into its text and its URL, mirroring _unwrap in
+   web/sheets_data.py. Most cells are neither, and pass straight through. */
+function unwrapCell(value) {
+  const match = HYPERLINK.exec(String(value == null ? '' : value).trim());
+  if (!match) return [String(value == null ? '' : value), null];
+  return [match[1].replace(/""/g, '"'), match[2].replace(/""/g, '"')];
+}
+
+/* Raw rows into the record shape the panel expects. Blank rows are dropped and
+   _row keeps each record's real position in the sheet, which is what makes a
+   row in the table findable in the spreadsheet itself. */
+function shapeRows(raw, worksheet, capturedAt) {
+  const header = (raw[0] || []).map((h) => String(h).trim());
+  while (header.length && !header[header.length - 1]) header.pop();
+  const columns = header.filter(Boolean);
+  const rows = [];
+  for (let i = 1; i < raw.length; i++) {
+    const record = { _row: i + 1 };
+    let blank = true;
+    header.forEach((column, index) => {
+      if (!column) return;
+      const [text, url] = unwrapCell(raw[i][index]);
+      record[column] = text;
+      if (url) record[`${column}__url`] = url;
+      if (text.trim()) blank = false;
+    });
+    if (!blank) rows.push(record);
+  }
+  return { worksheet, columns, rows, row_count: rows.length,
+           captured_at: capturedAt || new Date().toISOString() };
+}
+
+async function liveManifest(token) {
+  const view = await jsonp(
+    `${SETTINGS_URL}?action=tabs&token=${encodeURIComponent(token)}`);
+  if (!view.ok) throw new Error(view.error || 'the service refused the request');
+  /* A deployment older than this page answers an action it does not know by
+     reading the Settings tab instead — a perfectly valid reply to a different
+     question. Taken at face value it produces an empty dashboard rather than
+     falling back to the published snapshot, so the reply has to be checked for
+     what was actually asked for. */
+  if (!Array.isArray(view.worksheets)) {
+    throw new Error('the Settings service does not serve tabs yet');
+  }
+  return {
+    captured_at: view.capturedAt,
+    spreadsheet_id: view.spreadsheetId || '',
+    worksheets: view.worksheets || [],
+    live: true,
+  };
+}
+
+async function liveWorksheet(name) {
+  const view = await jsonp(`${SETTINGS_URL}?action=rows` +
+    `&token=${encodeURIComponent(SESSION_TOKEN)}` +
+    `&worksheet=${encodeURIComponent(name)}`);
+  if (!view.ok) throw new Error(view.error || 'the service refused the request');
+  if (!Array.isArray(view.rows)) {
+    throw new Error(`the Settings service did not return rows for '${name}'`);
+  }
+  return shapeRows(view.rows, name, new Date().toISOString());
+}
+
 /* ── Signing in, and which project you are in ─────────────────────────────
    The password selects the project: the Settings service is asked which one it
    unlocks, so the landing page never has to list them and opening the URL
@@ -257,9 +337,24 @@ async function unlock(password, remember) {
    opened would be missing from its own menu. And the app is revealed last, so
    it is never briefly visible showing the previous project's name. */
 async function enter(project, key, token, remember = false) {
-  // Named explicitly rather than through fetchPayload(), which reads PROJECT —
-  // and PROJECT must not be set until the key has proved itself.
-  const manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
+  /* Live first, snapshot second.
+     A project that has never been published — every new one — has no encrypted
+     files at all, so requiring them would mean the dashboard could not open
+     until a CI run had happened. Asking the service is also the better check
+     that this session is still good: the token is what the rest of the page
+     uses, so proving the token beats proving a key that only ever decrypted a
+     stale file. The snapshot still opens a project whose service is
+     unreachable but whose files were published. */
+  let manifest;
+  try {
+    if (!token) throw new Error('no session token');
+    manifest = await liveManifest(token);
+  } catch (liveError) {
+    // Named explicitly rather than through fetchPayload(), which reads PROJECT
+    // — and PROJECT must not be set until this has succeeded.
+    manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
+    manifest.live = false;
+  }
 
   PROJECT = project;
   KEY = key;
@@ -844,10 +939,12 @@ function renderFacets() {
 
 async function loadSheet(worksheet) {
   banner($('data-error'), '', '');
-  $('data-count').textContent = 'decrypting…';
+  $('data-count').textContent = MANIFEST && MANIFEST.live ? 'reading…' : 'decrypting…';
   try {
     if (!data.cache[worksheet]) {
-      data.cache[worksheet] = await fetchEncrypted(worksheet, KEY);
+      data.cache[worksheet] = MANIFEST.live
+        ? await liveWorksheet(worksheet)
+        : await fetchEncrypted(worksheet, KEY);
     }
     const payload = data.cache[worksheet];
     data.worksheet = worksheet;
@@ -909,7 +1006,11 @@ const AUTOMATIONS = [
   ['Organisation classification', 'Sort every organisation into Company / University / Government / Hospital / Nonprofit / Research.', 'classify-only'],
   ['Pagination analysis', 'Measure how many jobs sit behind “See More Jobs”. Read-only.', 'pagination-only'],
   ['Clear stale company rows', 'Remove company rows no longer referenced by Jobs. Dry-run unless confirmed in its config.', 'cleanup-rows'],
-  ['Refresh this dashboard', 'Re-export and republish the data. Writes nothing to the sheet.', 'publish-only'],
+  /* No "Refresh this dashboard" any more. It existed to re-export and
+     republish the encrypted snapshot, and the panel now reads the sheet
+     directly — so there is nothing to refresh, and offering it would suggest
+     the data here can be out of date. publish-only still exists as a command
+     for anyone who wants an offline copy. */
 ];
 
 /* What the last poll said: which modes are busy, and whether a machine is on. */
@@ -1649,11 +1750,19 @@ async function boot() {
   const captured = new Date(MANIFEST.captured_at);
   const ageHours = (Date.now() - captured) / 36e5;
   const chip = $('captured');
-  chip.textContent = `data from ${captured.toLocaleString()}`;
-  chip.className = `pill ${ageHours > 24 * 8 ? 'stale' : 'neutral'}`;
-  chip.title = ageHours > 24 * 8
-    ? 'Older than the weekly schedule — a run may have failed.'
-    : 'Captured by the most recent successful run.';
+  if (MANIFEST.live) {
+    // Read from the spreadsheet just now, so age is not a thing that can go
+    // wrong — saying "data from <a time>" would imply it might be old.
+    chip.textContent = 'live from the sheet';
+    chip.className = 'pill ok';
+    chip.title = 'Read from the spreadsheet when this page loaded. ' +
+                 'Reload, or reopen a tab, to see newer rows.';
+  } else {
+    chip.textContent = `data from ${captured.toLocaleString()}`;
+    chip.className = `pill ${ageHours > 24 * 8 ? 'stale' : 'neutral'}`;
+    chip.title = 'A published snapshot — the service was unreachable, so this ' +
+                 'is the last export rather than what the sheet says now.';
+  }
 
   const days = remainingDays();
   $('btn-lock').title = days
@@ -1662,7 +1771,9 @@ async function boot() {
 
   renderRunActions();
   if (usable.length) await loadSheet(usable[0].name);
-  else banner($('data-error'), 'warn', 'The last run published no readable worksheets.');
+  else banner($('data-error'), 'warn', MANIFEST.live
+    ? 'This project\'s spreadsheet has no tabs with any rows in them yet.'
+    : 'The last run published no readable worksheets.');
 }
 
 resume().catch(() => { /* fall through to the login form */ });

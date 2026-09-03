@@ -808,6 +808,44 @@ function _deleteRows(project, body) {
 }
 
 
+/**
+ * Which tabs this project has, and how big they are.
+ *
+ * The dashboard's index. It used to come from an encrypted file that a
+ * scheduled CI job wrote, which meant the page showed whatever the last
+ * successful publish contained and needed a runner to stay current. Read from
+ * here it is simply what the spreadsheet says right now.
+ *
+ * Deliberately cheap: getLastRow and the header row only, never the contents.
+ * A project with tens of thousands of rows must not make opening the dashboard
+ * slow, and the rows are fetched per tab when one is actually looked at.
+ */
+function _projectTabs(project) {
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var worksheets = spreadsheet.getSheets().map(function (sheet) {
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+    var columns = [];
+    if (lastRow >= 1 && lastCol >= 1) {
+      columns = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+        .map(function (h) { return String(h).trim(); });
+      while (columns.length && !columns[columns.length - 1]) columns.pop();
+    }
+    return {
+      name: sheet.getName(),
+      // Data rows, header excluded — the count the dashboard shows.
+      row_count: Math.max(0, lastRow - 1),
+      columns: columns.filter(String)
+    };
+  });
+  return {
+    capturedAt: new Date().toISOString(),
+    spreadsheetId: project.spreadsheet_id,
+    worksheets: worksheets
+  };
+}
+
+
 /* ── The run queue ──────────────────────────────────────────────────────────
    What lets the pipeline run on someone's own machine while the website stays
    the way you ask for it.
@@ -1815,6 +1853,10 @@ function doGet(e) {
       } else if (action === 'keywords') {
         payload = { ok: true, project: authed.id, keywords: _readKeywords(authed),
                     readAt: new Date().toISOString() };
+      } else if (action === 'tabs') {
+        payload = _projectTabs(authed);
+        payload.ok = true;
+        payload.project = authed.id;
       } else if (action === 'runs') {
         payload = _runsView(authed, params);
         payload.ok = true;
