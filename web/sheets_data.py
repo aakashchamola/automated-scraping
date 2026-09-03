@@ -16,7 +16,7 @@ import threading
 import time
 
 from config_loader import load_config
-from google_sheets_store import GoogleSheetsStore
+import remote_store
 
 _CACHE_TTL_SECONDS = 60
 _cache = {}
@@ -48,7 +48,7 @@ def read(worksheet: str, force: bool = False) -> dict:
             return hit
 
     cfg = _config()
-    store = GoogleSheetsStore(cfg["google_sheets"])
+    store = remote_store.store_for(cfg)
     raw = store.load_all_rows(worksheet)
 
     header = [h.strip() for h in raw[0]] if raw else []

@@ -322,6 +322,52 @@ class GoogleSheetsStore:
         sheets_call(worksheet.update, rng, values, value_input_option="RAW")
         logger.info(f"Wrote {len(values)} cells to column {col} ({rng})")
 
+    def replace_tab(self, worksheet_name: str, rows: list,
+                    freeze_header: bool = True) -> None:
+        """Replace a tab's whole contents in one write.
+
+        A store method rather than the caller clearing a gspread worksheet
+        itself, so the credential-free store can offer the same call.
+        """
+        table = [[("" if c is None else str(c)) for c in (row or [])]
+                 for row in rows or []]
+        if not table:
+            raise ValueError("refusing to replace a tab with nothing")
+        worksheet = self.open_worksheet(worksheet_name)
+        sheets_call(worksheet.clear)
+        sheets_call(worksheet.update, values=table, range_name="A1",
+                    value_input_option="RAW")
+        if freeze_header:
+            try:
+                sheets_call(worksheet.freeze, rows=1)
+            except Exception as exc:
+                logger.debug(f"cosmetic formatting skipped: {exc}")
+        logger.info(f"Replaced '{worksheet_name}' with {len(table)} rows")
+
+    def delete_rows(self, worksheet_name: str, row_numbers: list) -> int:
+        """Delete rows by 1-based sheet row number. Returns how many went.
+
+        Descending, always: deleting row 5 renumbers every row below it, so
+        working downwards would take out the wrong rows after the first one.
+
+        It exists as a store method rather than the caller reaching for a
+        gspread worksheet so that the credential-free store can offer the same
+        call — a raw worksheet handle is the one thing it cannot hand back.
+        """
+        rows = sorted({int(n) for n in row_numbers if int(n) >= 2}, reverse=True)
+        if not rows:
+            return 0
+        worksheet = self.open_worksheet(worksheet_name) if worksheet_name \
+            else self._get_worksheet()
+        deleted = 0
+        for number in rows:
+            try:
+                sheets_call(worksheet.delete_rows, number)
+                deleted += 1
+            except Exception as exc:
+                logger.error(f"Could not delete row {number}: {exc}")
+        return deleted
+
     def batch_format_cells(
         self, cell_colors: list, worksheet_name: str = None
     ) -> None:

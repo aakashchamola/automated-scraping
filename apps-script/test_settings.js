@@ -28,8 +28,11 @@ class FakeSheet {
   getLastRow() { return this.rows.filter(r => r.some(c => String(c).trim())).length; }
   getLastColumn() { return Math.max(0, ...this.rows.map(r => r.length)); }
   getMaxRows() { return Math.max(this.rows.length, 1); }
+  getMaxColumns() { return Math.max(this.getLastColumn(), 1); }
   setFrozenRows(n) { this.frozen = n; }
   insertRowsAfter(_after, n) { for (let i = 0; i < n; i++) this.rows.push([]); }
+  insertColumnsAfter(_after, n) { for (const row of this.rows) for (let i = 0; i < n; i++) row.push(''); }
+  clear() { this.rows = []; }
   appendRow(values) { this.rows.push(values.slice()); }
   deleteRows(start, howMany) { this.rows.splice(start - 1, howMany); }
   deleteRow(n) { this.rows.splice(n - 1, 1); }
@@ -184,8 +187,14 @@ function buildSandbox(world) {
       getRootFolder: () => makeFolder('root'),
     },
     ContentService: {
-      MimeType: { JAVASCRIPT: 'js', JSON: 'json' },
-      createTextOutput: text => ({ text, setMimeType() { return this; }, getContent() { return text; } }),
+      MimeType: { JAVASCRIPT: 'JAVASCRIPT', JSON: 'JSON' },
+      // The mime type is kept, not discarded: whether a reply is javascript or
+      // JSON is part of the contract with the two very different callers.
+      createTextOutput: text => ({
+        text, mime: '',
+        setMimeType(type) { this.mime = type; return this; },
+        getContent() { return this.text; },
+      }),
     },
   };
   vm.createContext(sandbox);
@@ -453,6 +462,158 @@ console.log('\nSettings.gs\n');
   const unset = post(s, { action: 'organiseFiles', token: auth.token });
   check('with no folder configured it says so',
         unset.ok === false && /PROJECTS_FOLDER_ID/.test(unset.error), unset.error);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe rest of the pipeline, without the service-account key');
+  const auth = get(s, { action: 'auth', password: 'pw-alpha-secret' });
+
+  // Seeded here rather than in makeWorld: the rest of the suite asserts on an
+  // empty jobs tab, and rows in it would quietly change what those tests mean.
+  const seedTab = w => w.sheets['sheet-a'].sheets.push(new FakeSheet('Jobs_Test', [
+    ['Company', 'Role', 'Job Link', 'Job Status'],
+    ['Acme', 'Analyst', 'https://example.com/job/1', 'Live'],
+    ['Globex', 'Chemist', 'https://example.com/job/2', 'Dead'],
+    ['Initech', 'Biologist', 'https://example.com/job/3', ''],
+  ]));
+  seedTab(world);
+  const tabs = () => world.sheets['sheet-a'].getSheetByName('Jobs_Test').rows;
+
+  // Reading a whole tab. Withholding this is what kept the validator, the
+  // enricher and the career-page pass tied to the key.
+  const jobs = get(s, { action: 'rows', worksheet: 'Jobs_Test', token: auth.token });
+  check('any tab of the project can be read',
+        jobs.ok === true && jobs.rows.length === 4 &&
+        jobs.rows[0][3] === 'Job Status', JSON.stringify(jobs.rows[0]));
+  check('every cell arrives as a string',
+        jobs.rows.every(r => r.every(c => typeof c === 'string')));
+  const absent = get(s, { action: 'rows', worksheet: 'Not_A_Tab', token: auth.token });
+  check('a tab that does not exist reads as empty',
+        absent.ok === true && absent.rows.length === 0);
+  check('and reading it did not create it',
+        world.sheets['sheet-a'].getSheetByName('Not_A_Tab') === null);
+  const noTab = get(s, { action: 'rows', token: auth.token });
+  check('a request with no worksheet is refused, not answered about a guess',
+        noTab.ok === false && /worksheet name is required/.test(noTab.error), noTab.error);
+
+  // Another project's tab, with this project's session.
+  const other = get(s, { action: 'rows', worksheet: 'Jobs_Test',
+                         token: auth.token, project: 'beta' });
+  check('a session cannot read another project\'s tabs',
+        other.ok === false && other.signedOut === true, JSON.stringify(other));
+
+  // ensureColumn
+  const found = post(s, { action: 'ensureColumn', token: auth.token,
+                          worksheet: 'Jobs_Test', header: 'Job Status' });
+  check('an existing column is found, not added again',
+        found.position === 4 && found.added === false, JSON.stringify(found));
+  const added = post(s, { action: 'ensureColumn', token: auth.token,
+                          worksheet: 'Jobs_Test', header: 'Notes' });
+  check('a missing column is added at the end',
+        added.position === 5 && added.added === true && tabs()[0][4] === 'Notes',
+        JSON.stringify(added));
+
+  // writeColumn
+  const wrote = post(s, { action: 'writeColumn', token: auth.token,
+                          worksheet: 'Jobs_Test', col: 4, startRow: 2,
+                          values: [['A'], ['B'], ['C']] });
+  check('a column is written below the header',
+        wrote.written === 3 && tabs()[1][3] === 'A' && tabs()[3][3] === 'C',
+        JSON.stringify(tabs().map(r => r[3])));
+  check('and the header survives', tabs()[0][3] === 'Job Status');
+  const flat = post(s, { action: 'writeColumn', token: auth.token,
+                         worksheet: 'Jobs_Test', col: 4, startRow: 2,
+                         values: ['X', 'Y', 'Z'] });
+  check('a flat list of values is accepted too',
+        flat.written === 3 && tabs()[1][3] === 'X');
+  const past = post(s, { action: 'writeColumn', token: auth.token,
+                         worksheet: 'Jobs_Test', col: 4, startRow: 10,
+                         values: [['deep']] });
+  check('writing past the end of the sheet grows it',
+        past.written === 1 && tabs()[9][3] === 'deep', String(tabs().length));
+  const badCol = post(s, { action: 'writeColumn', token: auth.token,
+                           worksheet: 'Jobs_Test', col: 0, values: [['x']] });
+  check('a column number below 1 is refused',
+        badCol.ok === false && /1-based/.test(badCol.error), badCol.error);
+
+  // deleteRows
+  const before = tabs().length;
+  const gone = post(s, { action: 'deleteRows', token: auth.token,
+                         worksheet: 'Jobs_Test', rows: [2, 3] });
+  check('rows are deleted', gone.deleted === 2 && tabs().length === before - 2,
+        JSON.stringify(gone));
+  const header = post(s, { action: 'deleteRows', token: auth.token,
+                           worksheet: 'Jobs_Test', rows: [1] });
+  check('the header row is never deleted', header.deleted === 0 &&
+        tabs()[0][0] === 'Company', JSON.stringify(tabs()[0]));
+
+  // Ascending input must still delete the right rows: row 2 going renumbers
+  // row 3, so the sort has to happen on this side whatever the caller sent.
+  const w2 = makeWorld(); const s2 = buildSandbox(w2); seedProjects(s2, w2);
+  seedTab(w2);
+  const a2 = get(s2, { action: 'auth', password: 'pw-alpha-secret' });
+  post(s2, { action: 'deleteRows', token: a2.token, worksheet: 'Jobs_Test',
+             rows: [2, 3] });
+  const left = w2.sheets['sheet-a'].getSheetByName('Jobs_Test').rows;
+  check('ascending row numbers still delete the intended rows',
+        left.length === 2 && left[1][0] === 'Initech',
+        JSON.stringify(left.map(r => r[0])));
+
+  // replaceTab
+  const replaced = post(s, { action: 'replaceTab', token: auth.token,
+                             worksheet: 'Report', rows: [['A', 'B'], ['1', '2']] });
+  check('a tab can be replaced wholesale', replaced.rows === 2 &&
+        replaced.columns === 2, JSON.stringify(replaced));
+  check('and it was created to receive it',
+        world.sheets['sheet-a'].getSheetByName('Report') !== null);
+  const ragged = post(s, { action: 'replaceTab', token: auth.token,
+                           worksheet: 'Report', rows: [['A', 'B', 'C'], ['1']] });
+  check('a ragged table is padded rather than rejected',
+        ragged.columns === 3 &&
+        world.sheets['sheet-a'].getSheetByName('Report').rows[1].length === 3,
+        JSON.stringify(ragged));
+  const nothing = post(s, { action: 'replaceTab', token: auth.token,
+                            worksheet: 'Report', rows: [] });
+  check('replacing a tab with nothing is refused',
+        nothing.ok === false && /refusing/.test(nothing.error), nothing.error);
+  check('so the tab still has its rows',
+        world.sheets['sheet-a'].getSheetByName('Report').rows.length === 2);
+
+  // None of it works without a password.
+  ['ensureColumn', 'writeColumn', 'deleteRows', 'replaceTab'].forEach(action => {
+    const out = post(s, { action: action, worksheet: 'Jobs_Test', col: 1,
+                          header: 'x', rows: [2], values: [['x']] });
+    check(action + ' needs a password', out.ok === false && out.signedOut === true);
+  });
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe reply is wrapped only for whoever asked for a wrapper');
+
+  // The dashboard is a page with no CORS header to work with, so it can only
+  // read this as a <script> — it always sends a callback and must get JSONP.
+  const wrapped = s.doGet({ parameter: { ping: '1', callback: 'cb17' } });
+  check('a requested callback wraps the reply',
+        /^cb17\(\{.*\}\);$/.test(wrapped.getContent()),
+        wrapped.getContent().slice(0, 40));
+  check('and is served as javascript', wrapped.mime === 'JAVASCRIPT', wrapped.mime);
+
+  // The pipeline is a program. It fed `x({...});` to a JSON parser and died on
+  // the first character, which broke every credential-free run.
+  const plain = s.doGet({ parameter: { ping: '1' } });
+  check('no callback means plain JSON, not a wrapper',
+        plain.getContent().charAt(0) === '{', plain.getContent().slice(0, 40));
+  check('and is served as JSON', plain.mime === 'JSON', plain.mime);
+  check('which parses without unwrapping anything',
+        JSON.parse(plain.getContent()).version === 4);
+
+  // A callback name is interpolated into javascript, so it may only ever be a
+  // bare identifier.
+  const nasty = s.doGet({ parameter: { ping: '1', callback: 'evil();x' } });
+  check('a callback that is not an identifier falls back to a safe name',
+        /^callback\(/.test(nasty.getContent()), nasty.getContent().slice(0, 40));
 }
 
 {

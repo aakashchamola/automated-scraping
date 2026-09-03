@@ -230,14 +230,11 @@ def seed(store, config: dict, worksheet: str = WORKSHEET) -> int:
         table.append([group, path, value, field["type"],
                       _options(field), field.get("help", "")])
 
-    sheet = store.open_worksheet(worksheet)
-    sheet.clear()
-    sheet.update(values=table, range_name="A1", value_input_option="RAW")
-    try:
-        sheet.freeze(rows=1)
-        sheet.format("A1:F1", {"textFormat": {"bold": True}})
-    except Exception as exc:
-        logger.debug(f"cosmetic formatting skipped: {exc}")
+    # Through the store, so seeding works on a machine that has only a project
+    # password. The bold header goes with it — replace_tab freezes row 1, which
+    # is the part that matters, and colour is not worth a credentials
+    # requirement.
+    store.replace_tab(worksheet, table)
     return len(table) - 1
 
 
@@ -256,8 +253,8 @@ def main() -> None:
 
     projects_registry.resolve(config, args.project)
     setup_logging_from_config(config)
-    from google_sheets_store import GoogleSheetsStore
-    store = GoogleSheetsStore(config["google_sheets"])
+    import remote_store
+    store = remote_store.store_for(config)
 
     if args.seed:
         count = seed(store, config, args.worksheet)

@@ -641,6 +641,173 @@ function _appendJobs(project, body) {
   };
 }
 
+/* ── The rest of the pipeline, credential-free ──────────────────────────────
+   `inputs` and `appendJobs` cover the scrape. The other stages — validation,
+   enrichment, the mismatch and classifier passes, career pages, row cleanup —
+   read arbitrary tabs and write columns back, so without these they were the
+   one part that still demanded the service-account key. That key cannot be
+   scoped to a single project, so needing it for four of the eight run modes
+   meant "run it on your own machine" was only ever half true.
+
+   These grant nothing the password did not already grant: the dashboard can
+   read and write this project's Settings and Keywords with the same password,
+   and every one of these actions is confined to the project the password
+   selects. What they add is reach across that one project's own tabs.        */
+
+/** Every row of one of this project's tabs, as strings. */
+function _tabRows(project, name) {
+  var tab = String(name || '').trim();
+  if (!tab) throw new Error('a worksheet name is required');
+  var sheet = SpreadsheetApp.openById(project.spreadsheet_id).getSheetByName(tab);
+  // Absent is empty, not an error: the Sheets-API store creates a missing tab
+  // on demand and reads back nothing, and a read should not make a tab either
+  // way. The write actions below do create one.
+  if (!sheet) return [];
+  return sheet.getDataRange().getValues().map(function (row) {
+    return row.map(function (cell) { return String(cell == null ? '' : cell); });
+  });
+}
+
+/** The tab a request means, defaulting to the project's jobs tab. */
+function _tabOrJobs(project, name) {
+  var tab = String(name || '').trim();
+  if (tab) return tab;
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var settings = spreadsheet.getSheetByName(SHEET_NAME);
+  var rows = settings ? settings.getDataRange().getValues() : [];
+  return _settingValue(rows, 'google_sheets.jobs_worksheet', 'Jobs');
+}
+
+function _sheetForWriting(project, name) {
+  var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
+  var tab = _tabOrJobs(project, name);
+  var sheet = spreadsheet.getSheetByName(tab);
+  if (!sheet) sheet = spreadsheet.insertSheet(tab);
+  return sheet;
+}
+
+/**
+ * The 1-based position of a header, adding the column if it is missing.
+ *
+ * How the validator finds its "Job Status" column on a sheet that has never
+ * been validated before.
+ */
+function _ensureColumn(project, body) {
+  var header = String(body.header || '').trim();
+  if (!header) throw new Error('a header name is required');
+  var sheet = _sheetForWriting(project, body.worksheet);
+  var values = sheet.getDataRange().getValues();
+  var row = (values[0] || []).map(function (h) { return String(h).trim(); });
+  var at = row.indexOf(header);
+  if (at >= 0) return { worksheet: sheet.getName(), position: at + 1, added: false };
+  var position = row.length + 1;
+  sheet.getRange(1, position).setValue(header);
+  return { worksheet: sheet.getName(), position: position, added: true };
+}
+
+/**
+ * Write a column in ONE call.
+ *
+ * The whole column at once rather than a cell at a time, for the reason the
+ * Sheets-API side batches too: 60 writes a minute per user means per-row
+ * updates start failing a few hundred rows in, and the failures were being
+ * logged and discarded under a summary that read like success.
+ */
+function _writeColumn(project, body) {
+  var col = parseInt(body.col, 10);
+  if (!(col >= 1)) throw new Error('col must be a 1-based column number');
+  var startRow = parseInt(body.startRow, 10) || 2;
+  if (startRow < 1) throw new Error('startRow must be 1 or more');
+
+  // write_column_values sends [[v], [v], …]; a flat list is accepted too.
+  var values = (body.values || []).map(function (v) {
+    return [String((Array.isArray(v) ? v[0] : v) == null
+      ? '' : (Array.isArray(v) ? v[0] : v))];
+  });
+  if (!values.length) return { worksheet: _tabOrJobs(project, body.worksheet), written: 0 };
+
+  var sheet = _sheetForWriting(project, body.worksheet);
+  var needed = startRow + values.length - 1;
+  if (sheet.getMaxRows() < needed) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), needed - sheet.getMaxRows());
+  }
+  if (sheet.getMaxColumns() < col) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), col - sheet.getMaxColumns());
+  }
+  sheet.getRange(startRow, col, values.length, 1).setValues(values);
+  return { worksheet: sheet.getName(), written: values.length,
+           col: col, startRow: startRow };
+}
+
+/**
+ * Replace a tab's whole contents with *rows*.
+ *
+ * Two passes wanted exactly this — the pagination report and the Settings
+ * seeder — and both did it by clearing a gspread worksheet and writing A1
+ * downwards. It is the one thing that genuinely needed a live worksheet
+ * handle, so having it here is what lets the remote store drop open_worksheet
+ * altogether.
+ *
+ * Cleared and rewritten rather than diffed: the caller is rebuilding the tab,
+ * and a partial overwrite would leave whatever the old table had further down.
+ */
+function _replaceTab(project, body) {
+  var rows = body.rows || [];
+  if (!rows.length) throw new Error('refusing to replace a tab with nothing');
+
+  var width = 0;
+  var table = rows.map(function (row) {
+    var cells = (row || []).map(function (c) { return String(c == null ? '' : c); });
+    if (cells.length > width) width = cells.length;
+    return cells;
+  });
+  if (!width) throw new Error('refusing to replace a tab with empty rows');
+  // setValues demands a rectangle; a ragged table is padded, not rejected.
+  table.forEach(function (cells) {
+    while (cells.length < width) cells.push('');
+  });
+
+  var sheet = _sheetForWriting(project, body.worksheet);
+  sheet.clear();
+  if (sheet.getMaxRows() < table.length) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), table.length - sheet.getMaxRows());
+  }
+  if (sheet.getMaxColumns() < width) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), width - sheet.getMaxColumns());
+  }
+  sheet.getRange(1, 1, table.length, width).setValues(table);
+  if (body.freezeHeader !== false) {
+    try { sheet.setFrozenRows(1); } catch (err) { /* cosmetic */ }
+  }
+  return { worksheet: sheet.getName(), rows: table.length, columns: width };
+}
+
+/**
+ * Delete rows by their 1-based sheet row numbers.
+ *
+ * Descending, always: deleting row 5 renumbers everything below it, so working
+ * downwards would take out the wrong rows after the first one. The caller sorts
+ * too — this does not trust it to have.
+ */
+function _deleteRows(project, body) {
+  var wanted = (body.rows || []).map(function (n) { return parseInt(n, 10); })
+    .filter(function (n) { return n >= 2; });          // never the header
+  if (!wanted.length) return { worksheet: _tabOrJobs(project, body.worksheet), deleted: 0 };
+
+  var sheet = _sheetForWriting(project, body.worksheet);
+  var last = sheet.getLastRow();
+  var unique = {};
+  wanted.forEach(function (n) { if (n <= last) unique[n] = true; });
+  var ordered = Object.keys(unique).map(Number).sort(function (a, b) { return b - a; });
+
+  var deleted = 0;
+  ordered.forEach(function (n) {
+    try { sheet.deleteRow(n); deleted++; } catch (err) { /* reported by count */ }
+  });
+  return { worksheet: sheet.getName(), deleted: deleted, requested: wanted.length };
+}
+
+
 /* ── Creating a project ─────────────────────────────────────────────────────
    Everything a new project needs, in one call: the spreadsheet, its tabs, the
    service account's editor grant, and the registry row. Nothing is left for
@@ -1305,6 +1472,12 @@ function doGet(e) {
       } else if (action === 'keywords') {
         payload = { ok: true, project: authed.id, keywords: _readKeywords(authed),
                     readAt: new Date().toISOString() };
+      } else if (action === 'rows') {
+        // Any one tab of this project's own spreadsheet. What the validator,
+        // the enricher and the career-page pass all need and could not get.
+        payload = { ok: true, project: authed.id,
+                    worksheet: params.worksheet || '',
+                    rows: _tabRows(authed, params.worksheet) };
       } else if (action === 'inputs') {
         // Everything the pipeline needs to read, so a machine running it holds
         // no Google credentials at all.
@@ -1323,8 +1496,20 @@ function doGet(e) {
     payload = { ok: false, error: String(err) };
   }
 
+  // JSONP only for whoever asked for it.
+  //
+  // The browser dashboard must have it: /exec sends no CORS header, so a page
+  // can only read this by loading it as a <script>. A program has no such
+  // problem and wants plain JSON — and wrapping it regardless meant the
+  // pipeline's own reader fed `x({...});` to a JSON parser and died on the
+  // first character. So the wrapper follows the request for one.
+  var callback = params.callback || '';
+  if (!callback) {
+    return ContentService
+      .createTextOutput(JSON.stringify(payload))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   // Only a bare identifier may be interpolated into the response.
-  var callback = params.callback || 'callback';
   var safe = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(callback) ? callback : 'callback';
   return ContentService
     .createTextOutput(safe + '(' + JSON.stringify(payload) + ');')
@@ -1439,6 +1624,14 @@ function doPost(e) {
       try {
         if (body.action === 'appendJobs') {
           result = _appendJobs(project, body);
+        } else if (body.action === 'ensureColumn') {
+          result = _ensureColumn(project, body);
+        } else if (body.action === 'writeColumn') {
+          result = _writeColumn(project, body);
+        } else if (body.action === 'deleteRows') {
+          result = _deleteRows(project, body);
+        } else if (body.action === 'replaceTab') {
+          result = _replaceTab(project, body);
         } else if (body.action === 'saveKeywords') {
           result = _writeKeywords(project, body.keywords || []);
         } else {

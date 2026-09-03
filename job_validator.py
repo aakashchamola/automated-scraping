@@ -27,7 +27,7 @@ import requests
 
 import projects_registry
 from config_loader import load_config
-from google_sheets_store import GoogleSheetsStore
+import remote_store
 from logger_setup import setup_logging_from_config
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ def check_job_url(url: str, timeout: int = 10) -> str:
 
 
 def validate_jobs(
-    sheet_store: GoogleSheetsStore,
+    sheet_store,
     worksheet: str,
     job_url_column: str = "Job Link",
     status_column: str = "Job Status",
@@ -326,14 +326,9 @@ def remove_rows_by_status(
             writer.writerow([num] + row)
     logger.info(f"Backed up {len(doomed)} rows to {backup} before deleting")
 
-    sheet = sheet_store.open_worksheet(worksheet)
-    deleted = 0
-    for num, _ in sorted(doomed, key=lambda pair: pair[0], reverse=True):
-        try:
-            sheet.delete_rows(num)
-            deleted += 1
-        except Exception as exc:
-            logger.error(f"Could not delete row {num}: {exc}")
+    # Via the store, not a gspread worksheet: the same call then works whether
+    # this machine has the service-account key or only a project password.
+    deleted = sheet_store.delete_rows(worksheet, [num for num, _ in doomed])
     logger.info(f"Removed {deleted} row(s) with status in {sorted(wanted)}")
     return deleted
 
@@ -376,7 +371,7 @@ if __name__ == "__main__":
     worksheet = args.worksheet or gs_config.get("jobs_worksheet", "Jobs")
     validation_cfg = config.get("job_validation", {})
     re_validate = validation_cfg.get("re_validate", True)
-    store = GoogleSheetsStore(gs_config)
+    store = remote_store.store_for(config)
     validate_jobs(
         store,
         worksheet=worksheet,

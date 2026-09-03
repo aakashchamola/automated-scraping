@@ -230,17 +230,15 @@ def _log_summary(reports: list, page_size: int) -> None:
 
 def _write_sheet(config: dict, reports: list, worksheet: str) -> None:
     """Write the report to a (test) worksheet, replacing its contents."""
-    from google_sheets_store import GoogleSheetsStore
+    import remote_store
 
     gs = config.get("google_sheets", {})
     if not gs.get("enabled"):
         logger.warning("Google Sheets not enabled; skipping sheet write")
         return
-    store = GoogleSheetsStore(gs)
-    ws = store.open_worksheet(worksheet)
+    store = remote_store.store_for(config)
     rows = [REPORT_HEADER] + [[str(r[c]) for c in REPORT_HEADER] for r in reports]
-    ws.clear()
-    ws.update("A1", rows)
+    store.replace_tab(worksheet, rows)
     logger.info(f"Wrote {len(reports)} report rows to worksheet '{worksheet}'")
 
 

@@ -26,6 +26,22 @@ SETTINGS = [
     ["Group", "Setting", "Value", "Type", "Options", "Description"],
     ["Sheets", "google_sheets.jobs_worksheet", "Jobs_Test", "text", "", ""],
 ]
+# Tabs the stub serves for `action=rows`, so the reading and writing surface is
+# exercised against something that behaves like a sheet rather than a canned
+# reply. Rows are 1-based in every request, header included.
+TABS = {
+    "Jobs_Test": [
+        ["Company", "Role", "Job Link", "Job Status"],
+        ["Acme", "Analyst", "https://example.com/job/1", "Live"],
+        ["Globex", "Chemist", "https://example.com/job/2", "Dead"],
+        ["Initech", "Biologist", "https://example.com/job/3", ""],
+    ],
+    "Company": [
+        ["Company", "Career-Page", "Linkedin-Url"],
+        ["Acme", "https://acme.test/careers", "https://linkedin.com/company/acme"],
+    ],
+}
+
 INPUTS = {
     "ok": True, "project": "main", "settingsRows": SETTINGS,
     "keywords": ["microbiologist", "research associate"],
@@ -43,17 +59,32 @@ class Stub(BaseHTTPRequestHandler):
     gets = 0
     fail_times = 0
     html_reply = False
+    always_wrap = False
+    callbacks_requested = []
+    tabs = {}
 
     def log_message(self, *args):
         pass
 
-    def _send(self, obj, status=200):
-        body = json.dumps(obj).encode()
+    def _send(self, obj, status=200, callback=""):
+        """Answer the way the real Web App does.
+
+        doGet wraps its reply in a callback whenever one is asked for, because
+        the browser dashboard can only read it as JSONP. A program has no such
+        constraint and wants plain JSON — but if it asks for a callback it gets
+        one, and json.loads then fails on the wrapper. That is a real bug this
+        stub used to hide by always answering plain JSON.
+        """
+        body = json.dumps(obj)
+        if callback:
+            body = f"{callback}({body});"
+        raw = body.encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type",
+                         "text/javascript" if callback else "application/json")
+        self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(raw)
 
     def _authorised(self, given):
         return given == PASSWORD
@@ -71,17 +102,76 @@ class Stub(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
         query = parse_qs(urlparse(self.path).query)
+        callback = query.get("callback", [""])[0]
+        Stub.callbacks_requested.append(callback)
+        if Stub.always_wrap and not callback:
+            # A deployment made before doGet learned to serve plain JSON wraps
+            # every reply whether one was asked for or not.
+            callback = "callback"
         if not self._authorised(query.get("password", [""])[0]):
-            return self._send({"ok": False, "error": "no project matched that password"})
-        self._send(dict(INPUTS))
+            return self._send({"ok": False, "error": "no project matched that password"},
+                              callback=callback)
+        if query.get("action", [""])[0] == "rows":
+            tab = query.get("worksheet", [""])[0]
+            # A tab that does not exist reads as empty, the way the Sheets-API
+            # store reads a tab it just created.
+            rows = [list(row) for row in Stub.tabs.get(tab, [])]
+            return self._send({"ok": True, "worksheet": tab, "rows": rows},
+                              callback=callback)
+        self._send(dict(INPUTS), callback=callback)
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if not self._authorised(body.get("password")):
             return self._send({"ok": False, "error": "no project matched that password"})
         Stub.posts.append(body)
+        action = body.get("action")
+        tab = body.get("worksheet") or INPUTS["jobsWorksheet"]
+
+        if action == "ensureColumn":
+            rows = Stub.tabs.setdefault(tab, [[]])
+            header = rows[0]
+            name = body["header"]
+            if name in header:
+                return self._send({"ok": True, "position": header.index(name) + 1,
+                                   "added": False, "worksheet": tab})
+            header.append(name)
+            return self._send({"ok": True, "position": len(header),
+                               "added": True, "worksheet": tab})
+
+        if action == "writeColumn":
+            rows = Stub.tabs.setdefault(tab, [[]])
+            col, start = int(body["col"]), int(body["startRow"])
+            values = body["values"]
+            while len(rows) < start + len(values) - 1:
+                rows.append([])
+            for offset, value in enumerate(values):
+                row = rows[start + offset - 1]
+                while len(row) < col:
+                    row.append("")
+                row[col - 1] = value
+            return self._send({"ok": True, "written": len(values),
+                               "worksheet": tab, "col": col, "startRow": start})
+
+        if action == "deleteRows":
+            rows = Stub.tabs.setdefault(tab, [[]])
+            # Descending, or each deletion would shift the ones after it. The
+            # stub does NOT sort: it is here to catch a caller that did not.
+            deleted = 0
+            for number in body["rows"]:
+                if 2 <= number <= len(rows):
+                    del rows[number - 1]
+                    deleted += 1
+            return self._send({"ok": True, "deleted": deleted, "worksheet": tab,
+                               "requested": len(body["rows"])})
+
+        if action == "replaceTab":
+            Stub.tabs[tab] = [list(row) for row in body["rows"]]
+            return self._send({"ok": True, "worksheet": tab,
+                               "rows": len(body["rows"])})
+
         self._send({"ok": True, "added": len(body.get("rows") or []), "duplicates": 0,
-                    "worksheet": body.get("worksheet"), "total": 0})
+                    "worksheet": tab, "total": 0})
 
 
 class RemoteStoreTest(unittest.TestCase):
@@ -102,6 +192,10 @@ class RemoteStoreTest(unittest.TestCase):
         Stub.gets = 0
         Stub.fail_times = 0
         Stub.html_reply = False
+        Stub.always_wrap = False
+        Stub.callbacks_requested = []
+        Stub.tabs = {name: [list(row) for row in rows]
+                     for name, rows in TABS.items()}
         remote_store.BACKOFF_SEC = 0            # no real waiting in a test
         self.store = remote_store.RemoteSheetsStore(self.url, PASSWORD)
 
@@ -141,12 +235,99 @@ class RemoteStoreTest(unittest.TestCase):
         self.store.load_existing()
         self.assertEqual(Stub.gets, 1, "a run wants one stable view, not three")
 
-    def test_a_tab_it_cannot_serve_says_so(self):
-        # Silently returning nothing would look like an empty sheet.
+    def test_any_tab_of_this_project_can_be_read(self):
+        """The validator and the enricher read whole tabs.
+
+        Refusing them is what tied those stages to the service-account key, so
+        four of the eight run modes needed it however the machine was set up.
+        """
+        rows = self.store.load_all_rows("Jobs_Test")
+        self.assertEqual(rows[0], ["Company", "Role", "Job Link", "Job Status"])
+        self.assertEqual(len(rows), 4)
+
+    def test_a_tab_that_does_not_exist_reads_as_empty(self):
+        # Matching GoogleSheetsStore, which creates the tab and reads nothing.
+        self.assertEqual(self.store.load_all_rows("Nothing_Here"), [])
+
+    def test_a_column_comes_off_a_tab_stripped_of_blanks(self):
+        self.assertEqual(self.store.load_column_values("Job Status", "Jobs_Test"),
+                         ["Live", "Dead"])
+        self.assertEqual(self.store.load_column_values("Nope", "Jobs_Test"), [])
+
+    def test_the_company_map_refuses_a_tab_the_project_is_not_configured_for(self):
+        """Answering about the configured tab instead would be a quiet lie."""
+        self.store.load_company_linkedin_map()          # the configured one
+        with self.assertRaises(remote_store.RemoteStoreError) as caught:
+            self.store.load_company_linkedin_map(worksheet_name="Somewhere_Else")
+        self.assertIn("Somewhere_Else", str(caught.exception))
+
+    # ── The rest of the pipeline's writes ─────────────────────────────────────
+
+    def test_a_missing_status_column_is_added(self):
+        position = self.store.ensure_column("Notes", "Jobs_Test")
+        self.assertEqual(position, 5)
+        self.assertEqual(self.store.ensure_column("Job Status", "Jobs_Test"), 4,
+                         "a column that exists is found, not added again")
+
+    def test_a_column_is_written_in_one_request(self):
+        self.store.write_column_values(4, [["A"], ["B"], ["C"]], "Jobs_Test")
+        writes = [p for p in Stub.posts if p["action"] == "writeColumn"]
+        self.assertEqual(len(writes), 1, "one request, whatever the length")
+        self.assertEqual([r[3] for r in Stub.tabs["Jobs_Test"][1:]], ["A", "B", "C"])
+
+    def test_a_column_write_starts_below_the_header_by_default(self):
+        self.store.write_column_values(4, [["X"]], "Jobs_Test")
+        self.assertEqual(Stub.posts[-1]["startRow"], 2)
+        self.assertEqual(Stub.tabs["Jobs_Test"][0][3], "Job Status",
+                         "the header must survive")
+
+    def test_a_very_long_column_is_split_but_stays_aligned(self):
+        remote_store.COLUMN_BATCH = 10
+        try:
+            self.store.write_column_values(4, [[str(n)] for n in range(25)], "Jobs_Test")
+        finally:
+            remote_store.COLUMN_BATCH = 2000
+        writes = [p for p in Stub.posts if p["action"] == "writeColumn"]
+        self.assertEqual([w["startRow"] for w in writes], [2, 12, 22],
+                         "each batch must start where the last one ended")
+        written = [row[3] for row in Stub.tabs["Jobs_Test"][1:]]
+        self.assertEqual(written, [str(n) for n in range(25)])
+
+    def test_an_empty_column_write_sends_nothing(self):
+        self.store.write_column_values(4, [], "Jobs_Test")
+        self.assertEqual(Stub.posts, [])
+
+    def test_rows_are_deleted_from_the_bottom_up(self):
+        """Deleting row 2 renumbers row 3, so ascending would take the wrong ones."""
+        self.store.delete_rows("Jobs_Test", [2, 3])
+        self.assertEqual(Stub.posts[-1]["rows"], [3, 2])
+        self.assertEqual([row[0] for row in Stub.tabs["Jobs_Test"]],
+                         ["Company", "Initech"])
+
+    def test_the_header_row_is_never_deleted(self):
+        self.assertEqual(self.store.delete_rows("Jobs_Test", [1]), 0)
+        self.assertEqual(Stub.posts, [])
+        self.assertEqual(Stub.tabs["Jobs_Test"][0][0], "Company")
+
+    def test_replacing_a_tab_leaves_only_the_new_rows(self):
+        self.store.replace_tab("Jobs_Test", [["Only"], ["Me"]])
+        self.assertEqual(Stub.tabs["Jobs_Test"], [["Only"], ["Me"]])
+
+    def test_replacing_a_tab_with_nothing_is_refused(self):
+        # A cleared tab is not what "replace" means, and it is unrecoverable.
         with self.assertRaises(remote_store.RemoteStoreError):
-            self.store.load_all_rows("Jobs_Test")
-        with self.assertRaises(remote_store.RemoteStoreError):
-            self.store.load_column_values("Company", "Company")
+            self.store.replace_tab("Jobs_Test", [])
+        self.assertEqual(len(Stub.tabs["Jobs_Test"]), 4)
+
+    def test_colour_is_skipped_rather_than_failing_a_run(self):
+        self.store.batch_format_rows([(2, {"red": 1}), (3, None)], 4, "Jobs_Test")
+        self.store.batch_format_cells([(2, 1, {"red": 1})], "Jobs_Test")
+        self.assertEqual(Stub.posts, [], "formatting needs the Sheets API")
+
+    def test_open_worksheet_says_what_to_use_instead(self):
+        with self.assertRaises(remote_store.RemoteStoreError) as caught:
+            self.store.open_worksheet("Jobs_Test")
+        self.assertIn("load_all_rows", str(caught.exception))
 
     # ── Writing ───────────────────────────────────────────────────────────────
 

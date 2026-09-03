@@ -25,8 +25,10 @@ POSTs and reads the reply.
 """
 
 import hashlib
+import json
 import logging
 import os
+import re
 import time
 
 import pandas as pd
@@ -47,6 +49,14 @@ BACKOFF_SEC = 5.0
 
 LINK_HASH_CHARS = 12
 
+# A column write is one request whatever its length, but Apps Script stops an
+# execution at six minutes, so very long columns still go in pieces.
+COLUMN_BATCH = 2000
+
+# Each deletion is its own Sheets operation, so these are kept to a size that
+# finishes inside one execution.
+DELETE_BATCH = 200
+
 
 def link_hash(url: str, chars: int = LINK_HASH_CHARS) -> str:
     """Short digest of a job URL.
@@ -59,12 +69,50 @@ def link_hash(url: str, chars: int = LINK_HASH_CHARS) -> str:
     return hashlib.sha256(str(url or "").strip().encode()).hexdigest()[:chars]
 
 
+JSONP_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*\((.*)\);?$", re.DOTALL)
+
+
+def unwrap_jsonp(text: str) -> str:
+    """The JSON inside ``callback({...});``, or *text* unchanged.
+
+    The Web App serves plain JSON to a program and JSONP only when a callback
+    is asked for — but a deployment made before it learned that wraps every
+    reply, and this has to keep working against one. Sending no callback and
+    still unwrapping is what makes the local run work today, without waiting on
+    a redeploy.
+    """
+    stripped = (text or "").strip()
+    match = JSONP_RE.match(stripped)
+    return match.group(1) if match else stripped
+
+
+def _setting_from_rows(rows: list, key: str, fallback: str) -> str:
+    """One setting's value out of the raw Settings rows."""
+    if not rows:
+        return fallback
+    header = [str(h).strip() for h in rows[0]]
+    if "Setting" not in header or "Value" not in header:
+        return fallback
+    key_at, value_at = header.index("Setting"), header.index("Value")
+    for row in rows[1:]:
+        if key_at < len(row) and str(row[key_at]).strip() == key:
+            value = str(row[value_at]).strip() if value_at < len(row) else ""
+            if value:
+                return value
+    return fallback
+
+
 class RemoteStoreError(RuntimeError):
     """The Web App could not be reached, or refused."""
 
 
 class RemoteSheetsStore:
-    """A GoogleSheetsStore work-alike backed by the Apps Script Web App."""
+    """A GoogleSheetsStore work-alike backed by the Apps Script Web App.
+
+    Method for method the same surface, argument order included, because the
+    pipeline is handed one or the other and must not be able to tell which.
+    tests/test_store_parity_unit.py holds that true.
+    """
 
     def __init__(self, exec_url: str, password: str, config: dict = None) -> None:
         self.exec_url = (exec_url or "").strip()
@@ -117,8 +165,7 @@ class RemoteSheetsStore:
                 "which usually means the deployment cannot open this project's "
                 "spreadsheet")
         try:
-            import json
-            payload = json.loads(text)
+            payload = json.loads(unwrap_jsonp(text))
         except ValueError as exc:
             raise RemoteStoreError(f"unreadable reply: {text[:200]}") from exc
 
@@ -131,7 +178,7 @@ class RemoteSheetsStore:
             return self._inputs
         logger.info("Fetching this project's inputs from the Settings service")
         payload = self._request("GET", params={
-            "action": "inputs", "password": self.password, "callback": "x"})
+            "action": "inputs", "password": self.password})
         self._inputs = payload
         logger.info(
             f"Project '{payload.get('project')}': "
@@ -146,27 +193,38 @@ class RemoteSheetsStore:
         return bool(self.exec_url and self.password)
 
     def load_all_rows(self, worksheet_name: str = None) -> list:
-        """Raw rows of a tab. Only Settings is available remotely.
+        """Raw rows of a tab, header included.
 
-        The others are either handed over in a shape the pipeline actually uses
-        (keywords, the company map) or deliberately withheld (the jobs already
-        collected). Asking for one of those is a bug rather than a fallback, so
-        it says so.
+        Settings comes out of the inputs already fetched, since the scrape needs
+        it anyway and it saves a round trip. Any other tab is fetched on demand:
+        the validator, the enricher, the mismatch and classifier passes and the
+        career-page pass all read whole tabs, and refusing them was what kept
+        those stages tied to the service-account key.
         """
-        inputs = self._fetch_inputs()
         if worksheet_name in (None, "Settings"):
-            return [list(row) for row in inputs.get("settingsRows") or []]
-        raise RemoteStoreError(
-            f"'{worksheet_name}' cannot be read through the Settings service; "
-            "only the Settings tab is available without Google credentials")
+            return [list(row) for row in self._fetch_inputs().get("settingsRows") or []]
+        payload = self._request("GET", params={
+            "action": "rows", "password": self.password,
+            "worksheet": worksheet_name})
+        return [list(row) for row in payload.get("rows") or []]
 
     def load_column_values(self, column_header: str, worksheet_name: str) -> list:
-        inputs = self._fetch_inputs()
+        """Non-empty values under a header.
+
+        Keywords are already in hand from the inputs; anything else is read off
+        the tab, matching what the Sheets-API store returns for the same call.
+        """
         if column_header == "Search Term" or worksheet_name == "Keywords":
-            return list(inputs.get("keywords") or [])
-        raise RemoteStoreError(
-            f"column '{column_header}' of '{worksheet_name}' is not available "
-            "through the Settings service")
+            return list(self._fetch_inputs().get("keywords") or [])
+        rows = self.load_all_rows(worksheet_name)
+        if not rows:
+            return []
+        header = [str(h).strip() for h in rows[0]]
+        if column_header not in header:
+            return []
+        at = header.index(column_header)
+        return [str(row[at]).strip() for row in rows[1:]
+                if at < len(row) and str(row[at]).strip()]
 
     def load_existing(self) -> pd.DataFrame:
         """Existing rows, as far as deduplication needs them.
@@ -187,13 +245,35 @@ class RemoteSheetsStore:
                 frame[column] = ""
         return frame[storage.OUTPUT_COLUMNS]
 
-    def load_company_linkedin_map(self, *args, **kwargs) -> dict:
-        return dict(self._fetch_inputs().get("companyLinkedIn") or {})
+    def load_company_linkedin_map(
+        self,
+        worksheet_name: str = "Company",
+        company_col: str = "Company",
+        linkedin_col: str = "Linkedin-Url",
+    ) -> dict:
+        """{lowercased company name -> LinkedIn URL}, from the inputs.
+
+        The three arguments are the same ones GoogleSheetsStore takes and are
+        accepted for that reason — a caller passing them positionally must land
+        in the same places. They are not used: which tab and columns to read is
+        settled on the far side, from this project's own Settings, so what
+        arrives is the finished map. Asking for a different tab than the project
+        is configured with would be a caller bug, and it says so rather than
+        quietly answering about the configured one.
+        """
+        inputs = self._fetch_inputs()
+        configured = _setting_from_rows(
+            inputs.get("settingsRows"),
+            "google_sheets.company_sheet.worksheet", "Company")
+        if worksheet_name and worksheet_name != configured:
+            raise RemoteStoreError(
+                f"the company map comes from '{configured}', which is what this "
+                f"project's Settings name; '{worksheet_name}' cannot be read "
+                "through the Settings service")
+        return dict(inputs.get("companyLinkedIn") or {})
 
     def append_rows(self, df: pd.DataFrame, company_linkedin: dict = None) -> None:
         """Send rows to the Web App, which writes them as the sheet's owner."""
-        import json
-
         if df is None or df.empty:
             logger.info("Nothing new to append")
             return
@@ -227,6 +307,100 @@ class RemoteSheetsStore:
 
         logger.info(f"Added {added} rows to '{inputs.get('jobsWorksheet')}'"
                     f"{f'; {duplicates} skipped as duplicates' if duplicates else ''}")
+
+
+    # ── Writing back ─────────────────────────────────────────────────────────
+    #
+    # Same signatures as GoogleSheetsStore, down to the argument order, because
+    # the callers are handed one or the other and must not be able to tell.
+
+    def ensure_column(self, header_name: str, worksheet_name: str = None) -> int:
+        """1-based position of a header, adding the column if it is missing."""
+        payload = self._request("POST", data=json.dumps({
+            "action": "ensureColumn", "password": self.password,
+            "worksheet": worksheet_name or "", "header": header_name}))
+        return int(payload.get("position") or 0)
+
+    def write_column_values(self, col: int, values: list,
+                            worksheet_name: str = None,
+                            start_row: int = 2) -> None:
+        """Write a whole column, one request per batch.
+
+        The batching is not an optimisation. Sheets allows 60 writes a minute
+        per user, so a cell at a time starts failing a few hundred rows in — and
+        the failures were logged and dropped under a summary that read like
+        success.
+        """
+        if not values:
+            return
+        flat = [(v[0] if isinstance(v, (list, tuple)) else v) for v in values]
+        for start in range(0, len(flat), COLUMN_BATCH):
+            chunk = flat[start:start + COLUMN_BATCH]
+            self._request("POST", data=json.dumps({
+                "action": "writeColumn", "password": self.password,
+                "worksheet": worksheet_name or "", "col": int(col),
+                "startRow": int(start_row) + start,
+                "values": ["" if v is None else str(v) for v in chunk]}))
+        logger.info(f"Wrote {len(flat)} cells to column {col}")
+
+    def update_cell(self, row: int, col: int, value: str,
+                    worksheet_name: str = None) -> None:
+        self.write_column_values(col, [[value]], worksheet_name, start_row=row)
+
+    def delete_rows(self, worksheet_name: str, row_numbers: list) -> int:
+        """Delete rows by 1-based sheet row number. Returns how many went."""
+        rows = sorted({int(n) for n in row_numbers if int(n) >= 2}, reverse=True)
+        if not rows:
+            return 0
+        deleted = 0
+        for start in range(0, len(rows), DELETE_BATCH):
+            payload = self._request("POST", data=json.dumps({
+                "action": "deleteRows", "password": self.password,
+                "worksheet": worksheet_name or "",
+                "rows": rows[start:start + DELETE_BATCH]}))
+            deleted += int(payload.get("deleted") or 0)
+        return deleted
+
+    def replace_tab(self, worksheet_name: str, rows: list,
+                    freeze_header: bool = True) -> None:
+        """Replace a tab's whole contents. Used to rebuild a generated tab."""
+        table = [[("" if c is None else str(c)) for c in (row or [])]
+                 for row in rows or []]
+        if not table:
+            raise RemoteStoreError("refusing to replace a tab with nothing")
+        self._request("POST", data=json.dumps({
+            "action": "replaceTab", "password": self.password,
+            "worksheet": worksheet_name or "", "rows": table,
+            "freezeHeader": bool(freeze_header)}))
+        logger.info(f"Replaced '{worksheet_name}' with {len(table)} rows")
+
+    # Colour is decoration, and the Web App has no action for it. Skipping it
+    # loudly beats either crashing a run over formatting or pretending it
+    # happened — the data is identical either way.
+    def batch_format_cells(self, cell_colors: list, worksheet_name: str = None) -> None:
+        if cell_colors:
+            logger.info(f"Skipping colour for {len(cell_colors)} cells: "
+                        "formatting needs the Sheets API, the data does not")
+
+    def batch_format_rows(self, row_colors: list, num_cols: int,
+                          worksheet_name: str = None) -> None:
+        wanted = [pair for pair in row_colors if pair[1] is not None]
+        if wanted:
+            logger.info(f"Skipping colour for {len(wanted)} rows: "
+                        "formatting needs the Sheets API, the data does not")
+
+    def open_worksheet(self, name: str):
+        """Not possible remotely, and it says which call to use instead.
+
+        A gspread worksheet is a live API handle; there is nothing to hand back.
+        Every use of it in the pipeline has a named replacement above, so this
+        being reached is a caller that has not been ported rather than a
+        limitation to work around.
+        """
+        raise RemoteStoreError(
+            f"open_worksheet('{name}') needs Google credentials. Use "
+            "load_all_rows, write_column_values, ensure_column or delete_rows, "
+            "which work either way.")
 
 
 # ── Choosing a store ─────────────────────────────────────────────────────────

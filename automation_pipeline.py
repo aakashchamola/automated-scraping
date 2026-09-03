@@ -28,7 +28,7 @@ import company_enricher
 import job_validator
 import projects_registry
 from config_loader import load_config
-from google_sheets_store import GoogleSheetsStore
+import remote_store
 from logger_setup import setup_logging_from_config
 from main import run as keyword_scraping_run, resolve_keywords, validate_config
 from scrapers.career_page import scrape_companies
@@ -63,7 +63,7 @@ def run_career_page_scraping(config: dict) -> None:
         logger.warning("Google Sheets not enabled; skipping career-page scraping")
         return
 
-    store = GoogleSheetsStore(gs_config)
+    store = remote_store.store_for(config)
 
     # Career pages come from the manually-curated Company sheet.
     cs = config.get("career_pages", {})
@@ -117,7 +117,7 @@ def run_career_page_scraping(config: dict) -> None:
     logger.info(f"Appended {len(new_jobs)} new career-page jobs to '{jobs_worksheet}'")
 
 
-def _existing_job_links(store: GoogleSheetsStore, worksheet: str) -> set:
+def _existing_job_links(store, worksheet: str) -> set:
     """Return the set of Job Link values already present in ``worksheet``."""
     rows = store.load_all_rows(worksheet)
     if not rows:
@@ -149,7 +149,7 @@ def run_validation(config: dict) -> None:
     if not gs_config.get("enabled"):
         logger.warning("Google Sheets not enabled; skipping validation")
         return
-    store = GoogleSheetsStore(gs_config)
+    store = remote_store.store_for(config)
     worksheet = gs_config.get("jobs_worksheet", "Jobs")
     status_column = "Job Status"
 

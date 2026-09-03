@@ -26,11 +26,23 @@ def config(**validation):
 class ValidationStepReadsItsConfig(unittest.TestCase):
 
     def run_step(self, cfg):
-        with mock.patch.object(pipeline, "GoogleSheetsStore") as store, \
+        # store_for is the seam, not GoogleSheetsStore: which store the step
+        # gets depends on whether the machine has the service-account key or
+        # only a project password, and the step must not care.
+        with mock.patch.object(pipeline.remote_store, "store_for") as store, \
              mock.patch.object(pipeline.job_validator, "validate_jobs") as validate, \
              mock.patch.object(pipeline.job_validator, "remove_rows_by_status") as remove:
             pipeline.run_validation(cfg)
         return store, validate, remove
+
+    def test_the_step_does_not_choose_a_store_itself(self):
+        """Whichever store store_for returns is the one that gets used.
+
+        Building GoogleSheetsStore here is what made validation demand the
+        service-account key however the machine was set up.
+        """
+        store, validate, _ = self.run_step(config())
+        self.assertIs(validate.call_args.args[0], store.return_value)
 
     def test_re_validate_is_passed_through(self):
         _, validate, _ = self.run_step(config(re_validate=False))

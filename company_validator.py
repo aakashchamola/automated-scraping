@@ -27,7 +27,7 @@ import sys
 
 import projects_registry
 from config_loader import load_config
-from google_sheets_store import GoogleSheetsStore
+import remote_store
 from logger_setup import setup_logging_from_config
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ def _normalize(value: str, field: str) -> str:
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 def flag_mismatches(
-    sheet_store: GoogleSheetsStore,
+    sheet_store,
     source_ws: str,
     source_company_col: str,
     enrich_ws: str,
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     enrich_company   = enrich_col_cfg.get("company", "Company")
 
     field_map = build_field_map(gs_config)
-    store = GoogleSheetsStore(gs_config)
+    store = remote_store.store_for(config)
     flag_mismatches(
         store, source_ws, source_company, enrich_ws, enrich_company,
         field_map=field_map,

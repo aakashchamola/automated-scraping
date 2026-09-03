@@ -51,10 +51,10 @@ def _worksheets(config: dict) -> list:
 
 def export(config: dict, out_dir: str) -> dict:
     # Imported here so --help works without Google libraries installed.
-    from google_sheets_store import GoogleSheetsStore
+    import remote_store
     from web.sheets_data import _unwrap
 
-    store = GoogleSheetsStore(config["google_sheets"])
+    store = remote_store.store_for(config)
     os.makedirs(out_dir, exist_ok=True)
     captured = datetime.now(timezone.utc).isoformat(timespec="seconds")
     manifest = {

@@ -34,7 +34,7 @@ import sys
 
 import projects_registry
 from config_loader import load_config
-from google_sheets_store import GoogleSheetsStore
+import remote_store
 from logger_setup import setup_logging_from_config
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ def classify_organization(
 # ── Sheet runner ──────────────────────────────────────────────────────────────
 
 def classify_sheet(
-    store: GoogleSheetsStore,
+    store,
     worksheet: str,
     name_col: str,
     output_col: str,
@@ -317,7 +317,7 @@ if __name__ == "__main__":
 
     cfg = _classification_cfg(config)
     source = args.source or cfg["source_worksheet"]
-    store = GoogleSheetsStore(gs_config)
+    store = remote_store.store_for(config)
     classify_sheet(
         store,
         worksheet=source,
