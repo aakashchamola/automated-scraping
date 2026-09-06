@@ -59,12 +59,30 @@ const check = (label, ok, detail) => ok
     const name = await page.textContent('#project-name');
     check('the header names the project', Boolean(name.trim()) && name !== '…', name);
 
-    await page.waitForFunction(
-      () => document.querySelectorAll('#data-body tr').length > 1,
-      null, { timeout: 60000 });
-    check('the published ciphertext decrypts and renders',
-          /\d/.test(await page.textContent('#data-count')),
-          await page.textContent('#data-count'));
+    /* The data comes from the Web App now, so this is also the check that the
+       deployed script is current. A stale one is a specific, fixable state —
+       it says so itself — and it should read as that rather than as a
+       Playwright timeout sixty seconds later. */
+    let rows = false;
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll('#data-body tr').length > 1,
+        null, { timeout: 60000 });
+      rows = true;
+    } catch (timedOut) {
+      const why = await page.textContent('#data-error');
+      if (/does not know the action/.test(why)) {
+        check('THE DEPLOYED SCRIPT IS BEHIND THIS CODE — re-paste ' +
+              'apps-script/Settings.gs and Deploy a new version', false, why.trim());
+      } else {
+        check('the sheet renders', false, why.trim() || 'no rows and no reason given');
+      }
+    }
+    if (rows) {
+      check('the sheet renders',
+            /\d/.test(await page.textContent('#data-count')),
+            await page.textContent('#data-count'));
+    }
 
     // The seam this exists for: Settings is read from the sheet by the Apps
     // Script, so it only works when that deployment is current AND the account
