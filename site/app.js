@@ -226,6 +226,15 @@ function shapeRows(raw, worksheet, capturedAt) {
 async function liveManifest(token) {
   const view = await jsonp(
     `${SETTINGS_URL}?action=tabs&token=${encodeURIComponent(token)}`);
+  /* A dead session and a deployment that cannot serve tabs both come back as
+     a refusal, and they must NOT be treated alike: the first has to send the
+     viewer back to the password, the second is merely a page newer than the
+     script and must not stop anyone signing in. */
+  if (view.signedOut) {
+    const dead = new Error(view.error || 'that session is no longer valid');
+    dead.signedOut = true;
+    throw dead;
+  }
   if (!view.ok) throw new Error(view.error || 'the service refused the request');
   /* A deployment older than this page answers an action it does not know by
      reading the Settings tab instead — a perfectly valid reply to a different
@@ -301,8 +310,21 @@ async function unlock(password, remember) {
     if (auth.ok) {
       project = { id: auth.project, name: auth.name || auth.project };
       token = auth.token;
-      const payload = await fetchPayloadFor(project.id, 'index');
-      key = await deriveKey(auth.dataKey, payload.kdf);
+      /* The key exists ONLY to decrypt a published snapshot, and its KDF
+         parameters live in that snapshot — so deriving it needs one to exist.
+         A project that has never been published has none, and reading the
+         sheet live needs no key at all.
+
+         This was a hard requirement, and it took sign-in down: publishing
+         stopped writing snapshots in the same change that started reading
+         tabs live, so the fetch 404'd and the password could not be used at
+         all. The key is optional now, because it always was. */
+      try {
+        const payload = await fetchPayloadFor(project.id, 'index');
+        key = await deriveKey(auth.dataKey, payload.kdf);
+      } catch (noSnapshot) {
+        key = null;
+      }
     } else if (auth.error && /no project matched|no password sent/i.test(auth.error)) {
       // The service is working and says no. Believe it.
       throw new AuthError('No project matched that password.');
@@ -311,7 +333,9 @@ async function unlock(password, remember) {
     // deployment mid-change — must not brick the page. Fall through.
   }
 
-  if (!key) {
+  // The token is what opening a project actually requires — not the key, which
+  // only some of the data paths use.
+  if (!token) {
     // There is deliberately no offline fallback.
     //
     // It used to try a project id stamped into config.js at publish time. That
@@ -337,23 +361,36 @@ async function unlock(password, remember) {
    opened would be missing from its own menu. And the app is revealed last, so
    it is never briefly visible showing the previous project's name. */
 async function enter(project, key, token, remember = false) {
-  /* Live first, snapshot second.
-     A project that has never been published — every new one — has no encrypted
-     files at all, so requiring them would mean the dashboard could not open
-     until a CI run had happened. Asking the service is also the better check
-     that this session is still good: the token is what the rest of the page
-     uses, so proving the token beats proving a key that only ever decrypted a
-     stale file. The snapshot still opens a project whose service is
-     unreachable but whose files were published. */
+  /* WHAT SIGNING IN MAY DEPEND ON: the password, and nothing else.
+     It used to depend on data as well — a published snapshot was decrypted
+     here to prove the key, so a project with no snapshot could not be opened
+     at all. That shipped broken exactly once: publishing stopped writing
+     snapshots in the same change that started reading tabs live, and against a
+     script that did not serve tabs yet there was nothing left to open with.
+     Sign-in died on a 404 for data nobody had asked to see.
+
+     So the data is fetched here but is never a condition. auth has already
+     checked the password and handed back this token and key; the panels that
+     need no data — Settings, Keywords, Runs, and every project control — work
+     regardless, and the Data panel says why it is empty.
+
+     The one refusal that must still stop everything is a dead session, because
+     nothing else on the page would work either. */
   let manifest;
   try {
     if (!token) throw new Error('no session token');
     manifest = await liveManifest(token);
   } catch (liveError) {
-    // Named explicitly rather than through fetchPayload(), which reads PROJECT
-    // — and PROJECT must not be set until this has succeeded.
-    manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
-    manifest.live = false;
+    if (liveError.signedOut) throw liveError;
+    try {
+      // Named explicitly rather than through fetchPayload(), which reads
+      // PROJECT — and PROJECT must not be set until this has succeeded.
+      manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
+      manifest.live = false;
+    } catch (snapshotError) {
+      manifest = { captured_at: '', spreadsheet_id: '', worksheets: [],
+                   live: false, unavailable: liveError.message };
+    }
   }
 
   PROJECT = project;
@@ -1750,7 +1787,11 @@ async function boot() {
   const captured = new Date(MANIFEST.captured_at);
   const ageHours = (Date.now() - captured) / 36e5;
   const chip = $('captured');
-  if (MANIFEST.live) {
+  if (MANIFEST.unavailable) {
+    chip.textContent = 'no data yet';
+    chip.className = 'pill warn';
+    chip.title = MANIFEST.unavailable;
+  } else if (MANIFEST.live) {
     // Read from the spreadsheet just now, so age is not a thing that can go
     // wrong — saying "data from <a time>" would imply it might be old.
     chip.textContent = 'live from the sheet';
@@ -1771,7 +1812,13 @@ async function boot() {
 
   renderRunActions();
   if (usable.length) await loadSheet(usable[0].name);
-  else banner($('data-error'), 'warn', MANIFEST.live
+  else if (MANIFEST.unavailable) {
+    // Everything else on the page works; say what is missing and how to fix it
+    // rather than leaving an empty table with no explanation.
+    banner($('data-error'), 'warn',
+      'Signed in, but this page could not read the sheet: ' + MANIFEST.unavailable +
+      ' Settings, Keywords and Runs all still work.');
+  } else banner($('data-error'), 'warn', MANIFEST.live
     ? 'This project\'s spreadsheet has no tabs with any rows in them yet.'
     : 'The last run published no readable worksheets.');
 }

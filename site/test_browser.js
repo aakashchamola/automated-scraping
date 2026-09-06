@@ -113,6 +113,10 @@ function tabsFor(id) {
    used to do. */
 let STUB_KNOWS_TABS = true;
 
+/* Flipped to play a session the service no longer recognises — a token that has
+   expired or been revoked by a password change. */
+let STUB_SIGNED_OUT = false;
+
 // The queue the dashboard drives. Per project, because a run belongs to one.
 const QUEUES = { main: [], biotech: [] };
 const AGENTS = { main: { online: false, everSeen: false },
@@ -178,7 +182,15 @@ function startStub() {
       const id = (p.get('token') || '').replace('token-', '');
       const spec = PROJECTS[id];
       if (!spec) payload = { ok: false, error: 'no project matched that password', signedOut: true };
-      else if (p.get('action') === 'tabs' && STUB_KNOWS_TABS) {
+      else if (STUB_SIGNED_OUT) {
+        payload = { ok: false, error: 'no project matched that password',
+                    signedOut: true };
+      } else if (p.get('action') === 'tabs' && !STUB_KNOWS_TABS) {
+        // What the deployed script actually answers: a named refusal, not a
+        // settings read.
+        payload = { ok: false, unknownAction: 'tabs',
+                    error: "this deployment does not know the action 'tabs'" };
+      } else if (p.get('action') === 'tabs' && STUB_KNOWS_TABS) {
         const tabs = tabsFor(id);
         payload = { ok: true, project: id, capturedAt: new Date().toISOString(),
                     spreadsheetId: 'sheet-' + id,
@@ -505,6 +517,56 @@ function check(label, ok, detail) {
     STUB_KNOWS_TABS = true;
 
     await page.click('#btn-lock');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+
+    console.log('\nsigning in when there is no data to be had');
+    /* Exactly how it shipped broken: publishing stopped writing snapshots in
+       the same change that started reading tabs live, against a deployment
+       that did not serve tabs yet. Neither source existed and sign-in died on
+       a 404 for data nobody had asked to see. Signing in may depend on the
+       password and nothing else. */
+    STUB_KNOWS_TABS = false;
+    await page.route('**/data/**', route => route.fulfill({ status: 404, body: 'no' }));
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('main-password-1');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    check('the password still gets you in', await page.isHidden('#gate'));
+    check('and it says why the table is empty rather than showing nothing',
+          /could not read the sheet/i.test(await page.textContent('#data-error')),
+          await page.textContent('#data-error'));
+    check('the chip does not claim data it does not have',
+          /no data yet/i.test(await page.textContent('#captured')),
+          await page.textContent('#captured'));
+
+    // The panels that need no data must be entirely unaffected.
+    await page.click('[data-panel="panel-keywords"]');
+    // Editable keywords are inputs, so their text is in .value, not textContent.
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('#keywords-list input')]
+        .some(i => /analyst/.test(i.value)),
+      null, { timeout: 20000 });
+    check('Keywords still works, and is still editable',
+          await page.isEnabled('#keyword-add'));
+    await page.click('[data-panel="panel-runs"]');
+    await page.waitForSelector('#run-actions .task', { timeout: 15000 });
+    check('and so does Runs', await page.isEnabled('#run-actions .task button'));
+
+    // A DEAD SESSION is the one refusal that must still stop everything —
+    // signing in on a stale token would leave every panel failing instead.
+    await page.evaluate(() => {
+      window.__realFetchToken = true;
+    });
+    STUB_SIGNED_OUT = true;
+    await page.reload();
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 20000 });
+    check('but a session the service has forgotten asks for the password again',
+          await page.isHidden('#app'));
+    STUB_SIGNED_OUT = false;
+    STUB_KNOWS_TABS = true;
+    await page.unroute('**/data/**');
+
+    await page.goto(URL_);
     await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
 
     console.log('\nstarting a run on your own machine');
