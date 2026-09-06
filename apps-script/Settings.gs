@@ -895,26 +895,21 @@ function scheduledRun() {
  * successful publish contained and needed a runner to stay current. Read from
  * here it is simply what the spreadsheet says right now.
  *
- * Deliberately cheap: getLastRow and the header row only, never the contents.
- * A project with tens of thousands of rows must not make opening the dashboard
- * slow, and the rows are fetched per tab when one is actually looked at.
+ * Deliberately cheap: names and row counts, never contents. It used to read
+ * each tab's header row too, which nothing on the page uses and which cost a
+ * round trip per tab — on a ten-tab spreadsheet that was most of the nine
+ * seconds this took. The columns arrive with the rows, when a tab is opened.
+ *
+ * Opening the dashboard no longer waits for this either way; it is fetched in
+ * the background. But a second is better than nine.
  */
 function _projectTabs(project) {
   var spreadsheet = SpreadsheetApp.openById(project.spreadsheet_id);
   var worksheets = spreadsheet.getSheets().map(function (sheet) {
-    var lastRow = sheet.getLastRow();
-    var lastCol = sheet.getLastColumn();
-    var columns = [];
-    if (lastRow >= 1 && lastCol >= 1) {
-      columns = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
-        .map(function (h) { return String(h).trim(); });
-      while (columns.length && !columns[columns.length - 1]) columns.pop();
-    }
     return {
       name: sheet.getName(),
       // Data rows, header excluded — the count the dashboard shows.
-      row_count: Math.max(0, lastRow - 1),
-      columns: columns.filter(String)
+      row_count: Math.max(0, sheet.getLastRow() - 1)
     };
   });
   return {

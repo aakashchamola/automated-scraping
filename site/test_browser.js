@@ -117,6 +117,11 @@ let STUB_KNOWS_TABS = true;
    expired or been revoked by a password change. */
 let STUB_SIGNED_OUT = false;
 
+/* Milliseconds the `tabs` reply is held back. The real service takes about
+   nine seconds on a spreadsheet with ten tabs, which is exactly long enough
+   for "sign-in awaits the tab index" to look like sign-in being broken. */
+let STUB_TABS_DELAY_MS = 0;
+
 // The queue the dashboard drives. Per project, because a run belongs to one.
 const QUEUES = { main: [], biotech: [] };
 const AGENTS = { main: { online: false, everSeen: false },
@@ -194,8 +199,18 @@ function startStub() {
         const tabs = tabsFor(id);
         payload = { ok: true, project: id, capturedAt: new Date().toISOString(),
                     spreadsheetId: 'sheet-' + id,
+                    // No `columns`: the service stopped sending them, because
+                    // the page never used them and they cost a round trip a tab.
                     worksheets: Object.entries(tabs).map(([name, rows]) => ({
-                      name, row_count: rows.length - 1, columns: rows[0] })) };
+                      name, row_count: rows.length - 1 })) };
+        if (STUB_TABS_DELAY_MS) {
+          const cb0 = p.get('callback') || 'callback';
+          setTimeout(() => {
+            res.writeHead(200, { 'Content-Type': 'text/javascript' });
+            res.end(`${cb0}(${JSON.stringify(payload)});`);
+          }, STUB_TABS_DELAY_MS);
+          return;
+        }
       } else if (p.get('action') === 'rows') {
         const want = p.get('worksheet') || '';
         payload = { ok: true, project: id, worksheet: want,
@@ -515,6 +530,43 @@ function check(label, ok, detail) {
           /last export/i.test(await page.getAttribute('#captured', 'title') || ''),
           await page.getAttribute('#captured', 'title'));
     STUB_KNOWS_TABS = true;
+
+    await page.click('#btn-lock');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+
+    console.log('\nsigning in does not wait for the data');
+    /* It did, and for nine seconds: reading a real spreadsheet's tab index is
+       slow, and the door was held shut for the whole of it while the password
+       had already been accepted. Signing in waits for the password and
+       nothing else. */
+    STUB_TABS_DELAY_MS = 6000;
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    const startedAt = Date.now();
+    await signIn('main-password-1');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    const openedIn = Date.now() - startedAt;
+    check('the app opens without waiting for the tab index',
+          openedIn < 4000, `${openedIn}ms, with the index held back 6000ms`);
+    check('and says the sheet is still being read',
+          /reading the sheet/i.test(await page.textContent('#captured')),
+          await page.textContent('#captured'));
+
+    // Everything that does not need the index is usable immediately.
+    await page.click('[data-panel="panel-runs"]');
+    await page.waitForSelector('#run-actions .task', { timeout: 10000 });
+    check('and the other panels work while it is still loading',
+          await page.isEnabled('#run-actions .task button'));
+
+    // Then it arrives and fills itself in, with no reload.
+    await page.click('[data-panel="panel-data"]');
+    await page.waitForFunction(
+      () => document.getElementById('data-body').textContent.includes('LinkedIn Reachout Co'),
+      null, { timeout: 25000 });
+    check('the data appears on its own once the index arrives',
+          /live from the sheet/i.test(await page.textContent('#captured')),
+          await page.textContent('#captured'));
+    STUB_TABS_DELAY_MS = 0;
 
     await page.click('#btn-lock');
     await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });

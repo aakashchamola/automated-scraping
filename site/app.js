@@ -352,51 +352,56 @@ async function unlock(password, remember) {
   await enter(project, key, token, remember);
 }
 
-/* Everything that has to be true once a project is open, in one place, so
-   signing in and switching cannot drift apart.
+/* Where the tab index comes from, and what to do when it does not come.
 
-   The order matters. The manifest is decrypted first, because that is what
-   proves the key is right and nothing should be stored or shown until it does.
-   The session is remembered before the switcher is drawn, or the project just
-   opened would be missing from its own menu. And the app is revealed last, so
-   it is never briefly visible showing the previous project's name. */
-async function enter(project, key, token, remember = false) {
-  /* WHAT SIGNING IN MAY DEPEND ON: the password, and nothing else.
-     It used to depend on data as well — a published snapshot was decrypted
-     here to prove the key, so a project with no snapshot could not be opened
-     at all. That shipped broken exactly once: publishing stopped writing
-     snapshots in the same change that started reading tabs live, and against a
-     script that did not serve tabs yet there was nothing left to open with.
-     Sign-in died on a 404 for data nobody had asked to see.
-
-     So the data is fetched here but is never a condition. auth has already
-     checked the password and handed back this token and key; the panels that
-     need no data — Settings, Keywords, Runs, and every project control — work
-     regardless, and the Data panel says why it is empty.
-
-     The one refusal that must still stop everything is a dead session, because
-     nothing else on the page would work either. */
-  let manifest;
+   Live first: the snapshot is a published export that nothing writes any more,
+   kept only for a project that still has one and cannot reach the service.
+   Neither is required — see enter(). */
+async function loadManifest(project, key, token) {
   try {
     if (!token) throw new Error('no session token');
-    manifest = await liveManifest(token);
+    return await liveManifest(token);
   } catch (liveError) {
     if (liveError.signedOut) throw liveError;
     try {
-      // Named explicitly rather than through fetchPayload(), which reads
-      // PROJECT — and PROJECT must not be set until this has succeeded.
-      manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
+      const manifest = await decryptWith(key, await fetchPayloadFor(project.id, 'index'));
       manifest.live = false;
+      return manifest;
     } catch (snapshotError) {
-      manifest = { captured_at: '', spreadsheet_id: '', worksheets: [],
-                   live: false, unavailable: liveError.message };
+      return { captured_at: '', spreadsheet_id: '', worksheets: [],
+               live: false, unavailable: liveError.message };
     }
   }
+}
 
+/* Everything that has to be true once a project is open, in one place, so
+   signing in and switching cannot drift apart.
+
+   The order matters. The session is remembered before the switcher is drawn,
+   or the project just opened would be missing from its own menu. And the app
+   is revealed last, so it is never briefly visible showing the previous
+   project's name. */
+async function enter(project, key, token, remember = false) {
+  /* WHAT SIGNING IN WAITS FOR: the password, and nothing else.
+
+     This has been wrong twice, in the same place, for the same reason — the
+     data and the door were tangled together. First the manifest was a
+     REQUIREMENT: it proved the key, so a project with no published snapshot
+     could not be opened at all, and sign-in died on a 404 the day publishing
+     stopped writing them. Then it was merely AWAITED, which is barely better:
+     reading the tab index of a real spreadsheet takes about nine seconds, so
+     the button sat on "Unlocking…" for nine seconds with everything already
+     in hand.
+
+     auth has checked the password and handed back the token and key. That is
+     the whole of signing in. The tab index is data, it is fetched in the
+     background, and the Data panel fills itself in when it arrives. */
   PROJECT = project;
   KEY = key;
   SESSION_TOKEN = token || null;
-  MANIFEST = manifest;
+  // A placeholder, replaced when the index arrives below.
+  MANIFEST = { captured_at: '', spreadsheet_id: '', worksheets: [],
+               live: false, loading: true };
   data.cache = {};                 // the previous project's tabs are not this one's
   SETTINGS_ROWS = null;
   KEYWORDS = null;
@@ -415,6 +420,30 @@ async function enter(project, key, token, remember = false) {
   $('gate').hidden = true;
   $('app').hidden = false;
   await boot();
+
+  /* Deliberately not awaited. A slow tab index must not hold the door shut,
+     and every other panel reads the sheet through its own call. */
+  const opened = project.id;
+  loadManifest(project, key, token).then((manifest) => {
+    // The viewer may have switched projects while this was in flight; a
+    // manifest belongs to the project it was asked for.
+    if (!PROJECT || PROJECT.id !== opened) return;
+    MANIFEST = manifest;
+    return boot();
+  }).catch(async (err) => {
+    if (!PROJECT || PROJECT.id !== opened) return;
+    if (err && err.signedOut) {
+      /* The one refusal that has to end the session. It is found late now
+         rather than before the page opened, which is the right trade: a valid
+         password must never wait on this, and a dead one is rare and obvious. */
+      await forgetSession(opened);
+      location.reload();
+      return;
+    }
+    MANIFEST = { captured_at: '', spreadsheet_id: '', worksheets: [],
+                 live: false, unavailable: err.message };
+    await boot();
+  });
 }
 
 /* Resume the project last looked at. A key that no longer decrypts means the
@@ -1787,7 +1816,11 @@ async function boot() {
   const captured = new Date(MANIFEST.captured_at);
   const ageHours = (Date.now() - captured) / 36e5;
   const chip = $('captured');
-  if (MANIFEST.unavailable) {
+  if (MANIFEST.loading) {
+    chip.textContent = 'reading the sheet…';
+    chip.className = 'pill neutral';
+    chip.title = 'Fetching the list of tabs. Everything else already works.';
+  } else if (MANIFEST.unavailable) {
     chip.textContent = 'no data yet';
     chip.className = 'pill warn';
     chip.title = MANIFEST.unavailable;
@@ -1812,7 +1845,11 @@ async function boot() {
 
   renderRunActions();
   if (usable.length) await loadSheet(usable[0].name);
-  else if (MANIFEST.unavailable) {
+  else if (MANIFEST.loading) {
+    // Not an error, and not empty — just not here yet. Saying "no worksheets"
+    // now would be wrong in a second's time.
+    $('data-count').textContent = 'reading the sheet…';
+  } else if (MANIFEST.unavailable) {
     // Everything else on the page works; say what is missing and how to fix it
     // rather than leaving an empty table with no explanation.
     banner($('data-error'), 'warn',
