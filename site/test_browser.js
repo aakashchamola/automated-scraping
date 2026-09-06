@@ -98,6 +98,10 @@ const SITE_PORT = 8787;
    their headers are there, but nothing has ever run. */
 let STUB_EMPTY = false;
 
+/* Flipped to play a run finishing while the page sits open — the sheet gains a
+   row that the page has no way to know about. */
+let STUB_EXTRA_ROW = false;
+
 function tabsFor(id) {
   if (STUB_EMPTY) {
     return {
@@ -110,7 +114,8 @@ function tabsFor(id) {
       ['Company', 'Role', 'Platform'],
       [PROJECTS[id].name + ' Co', 'Data Analyst', 'linkedin'],
       ['Second ' + id, 'ML Engineer', 'greenhouse'],
-    ],
+    ].concat(STUB_EXTRA_ROW
+      ? [['Scraped While You Watched', 'Bioinformatician', 'linkedin']] : []),
     Settings: [
       ['Group', 'Setting', 'Value', 'Type'],
       ['Scraping', 'scraping.max_pages', id === 'main' ? '3' : '7', 'int'],
@@ -335,6 +340,29 @@ function check(label, ok, detail) {
     await page.waitForFunction(() => document.querySelectorAll('#data-body tr').length > 0);
     check('its data decrypts and renders',
           (await page.textContent('#data-body')).includes('LinkedIn Reachout Co'));
+
+    console.log('\nrefreshing the data');
+    /* Rows are cached per tab for the life of the page, which is right — but
+       it meant a run finishing while the page was open changed nothing on
+       screen, and the only way to see the new rows was to reload the whole
+       page. */
+    STUB_EXTRA_ROW = true;
+    check('a new row is not there until it is asked for',
+          !(await page.textContent('#data-body')).includes('Scraped While You Watched'));
+    await page.click('#btn-refresh-data');
+    await page.waitForFunction(() =>
+      document.getElementById('data-body').textContent.includes('Scraped While You Watched'),
+      null, { timeout: 15000 });
+    check('Refresh reads the sheet again, with no reload and no password',
+          await page.isHidden('#gate'));
+    check('and the row count catches up with it',
+          /3 rows/.test(await page.textContent('#sheet-select')),
+          await page.textContent('#sheet-select'));
+    STUB_EXTRA_ROW = false;
+    await page.click('#btn-refresh-data');
+    await page.waitForFunction(() =>
+      !document.getElementById('data-body').textContent.includes('Scraped While You Watched'),
+      null, { timeout: 15000 });
 
     console.log('\nunlocking a second project');
     await page.click('#project-btn');

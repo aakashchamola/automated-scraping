@@ -1212,6 +1212,43 @@ $('page-next').addEventListener('click', () => { data.page++; renderTable(); });
 $('page-size').addEventListener('change', (e) => { data.pageSize = +e.target.value; data.page = 0; renderTable(); });
 $('sheet-select').addEventListener('change', (e) => loadSheet(e.target.value));
 
+/* Read the spreadsheet again.
+
+   Rows are cached per tab for the life of the page, which is right — moving
+   between tabs should not cost a round trip each time. But it means a run that
+   finishes while the page is open changes nothing on screen, and the only way
+   to see the new rows was to reload the whole page and sign in again on the
+   way. The tab index is re-read too, so a tab that has just gained its first
+   rows appears with them. */
+async function refreshData() {
+  const button = $('btn-refresh-data');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.textContent = 'Refreshing…';
+  banner($('data-error'), '', '');
+  try {
+    data.cache = {};
+    if (PROJECT) {
+      MANIFEST = await loadManifest(PROJECT, KEY, SESSION_TOKEN);
+    }
+    await boot();
+  } catch (err) {
+    if (err && err.signedOut) {
+      // The session ended while the page sat open; asking again is the only
+      // honest answer, and boot() would otherwise fail panel by panel.
+      if (PROJECT) await forgetSession(PROJECT.id);
+      location.reload();
+      return;
+    }
+    banner($('data-error'), 'err', `Could not refresh: ${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Refresh';
+  }
+}
+
+$('btn-refresh-data').addEventListener('click', refreshData);
+
 $('btn-export').addEventListener('click', () => {
   const rows = filteredRows();
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -2081,7 +2118,16 @@ async function boot() {
     : 'Sign out';
 
   renderRunActions();
-  if (usable.length) await loadSheet(usable[0].name);
+  /* Stay on the tab being looked at. boot() runs again whenever the index is
+     re-read — when it arrives in the background after sign-in, and on every
+     Refresh — and always loading the first tab would drag the viewer off
+     whichever one they had chosen, a moment after they chose it. */
+  const keep = data.worksheet && usable.some((w) => w.name === data.worksheet)
+    ? data.worksheet : null;
+  if (usable.length) {
+    sel.value = keep || usable[0].name;
+    await loadSheet(sel.value);
+  }
   else if (MANIFEST.loading) {
     // Not an error, and not empty — just not here yet. Saying "no worksheets"
     // now would be wrong in a second's time.
