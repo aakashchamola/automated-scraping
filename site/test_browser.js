@@ -94,7 +94,17 @@ const SITE_PORT = 8787;
 /* What each project's spreadsheet contains, as the service would serve it —
    raw rows, header first. The encrypted files are built from the same fixture,
    so a test can tell the live path from the snapshot path by content. */
+/* Flipped to play a project that has just been created: the tabs exist and
+   their headers are there, but nothing has ever run. */
+let STUB_EMPTY = false;
+
 function tabsFor(id) {
+  if (STUB_EMPTY) {
+    return {
+      Jobs: [['Company', 'Role', 'Platform']],
+      Settings: [['Group', 'Setting', 'Value', 'Type']],
+    };
+  }
   return {
     Jobs: [
       ['Company', 'Role', 'Platform'],
@@ -380,6 +390,33 @@ function check(label, ok, detail) {
     const mainValue = await page.inputValue('#settings-body input, #settings-body select').catch(() => '');
     check('the live sheet is read for the project you are in',
           mainValue === '3', 'got ' + JSON.stringify(mainValue));
+
+    /* Clearing the variables is not the same as clearing the screen. Each
+       panel is drawn by its own loader, which runs when its tab is clicked, so
+       switching project while sitting on Settings left the previous project's
+       settings on display — editable, and belonging to another spreadsheet. */
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    await page.click('#project-menu .menu-item:has-text("Biotech Jobs")');
+    let swapped = true;
+    try {
+      await page.waitForFunction(() => {
+        const field = document.querySelector('#settings-body input, #settings-body select');
+        return field && field.value === '7';
+      }, null, { timeout: 15000 });
+    } catch { swapped = false; }
+    check('switching project redraws the panel being looked at, with no reload',
+          swapped, 'settings still showed ' +
+          JSON.stringify(await page.inputValue('#settings-body input, #settings-body select')
+            .catch(() => '')));
+
+    await page.click('#project-btn');
+    await page.waitForSelector('#project-menu:not([hidden])');
+    await page.click('#project-menu .menu-item:has-text("LinkedIn Reachout")');
+    await page.waitForFunction(() => {
+      const field = document.querySelector('#settings-body input, #settings-body select');
+      return field && field.value === '3';
+    }, null, { timeout: 15000 });
 
     console.log('\nrunning it locally, and the project actions');
     await page.click('nav button:has-text("Run locally")');
@@ -702,6 +739,19 @@ function check(label, ok, detail) {
     await page.waitForSelector('#run-actions .task', { timeout: 15000 });
     check('and so does Runs', await page.isEnabled('#run-actions .task button'));
 
+    /* THE BUG THIS SHIPPED WITH. Staying signed in was stored correctly and
+       then thrown away on the next load: the record was only kept if it had a
+       decryption key, and once the page read the sheet live instead of reading
+       published snapshots there was nothing to derive a key from. So the
+       password was asked for on every single reload. The test that covered
+       reloading passed throughout, because its stub served a snapshot and so
+       always had a key — which is exactly why this is checked HERE, in the
+       block where there is no snapshot at all. */
+    await page.reload();
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    check('a reload still does not ask again when there is no snapshot to key from',
+          await page.isHidden('#gate'));
+
     // A DEAD SESSION is the one refusal that must still stop everything —
     // signing in on a stale token would leave every panel failing instead.
     await page.evaluate(() => {
@@ -717,6 +767,37 @@ function check(label, ok, detail) {
     await page.unroute('**/data/**');
 
     await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+
+    console.log('\na project that has just been created');
+    /* Every tab has a header and no rows. Dropping empty tabs from the picker
+       left the panel blank under "no worksheets", which is the first thing
+       anyone sees after making a project and reads as a failure. */
+    STUB_EMPTY = true;
+    await page.goto(URL_);
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await signIn('main-password-1');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 20000 });
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('#sheet-select option')]
+        .some((o) => o.textContent.includes('Jobs')), null, { timeout: 20000 });
+    const emptyOption = await page.textContent('#sheet-select option');
+    check('an empty tab is still offered, and says it is empty',
+          /empty/i.test(emptyOption), emptyOption);
+    await page.waitForFunction(() =>
+      document.getElementById('data-head').textContent.includes('Company'),
+      null, { timeout: 15000 });
+    check('its columns are shown, so the shape of what is coming is visible',
+          /Company/.test(await page.textContent('#data-head'))
+          && /Role/.test(await page.textContent('#data-head')),
+          await page.textContent('#data-head'));
+    check('and the table says it is waiting rather than blaming a filter',
+          /nothing here yet/i.test(await page.textContent('#data-body')),
+          await page.textContent('#data-body'));
+    STUB_EMPTY = false;
+    // Sign out again: this block signed in, and now that a session survives a
+    // reload the next block would resume straight past its own gate.
+    await page.click('#btn-lock');
     await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
 
     console.log('\nstarting a run on your own machine');

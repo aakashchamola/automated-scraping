@@ -94,7 +94,18 @@ async function loadSessions() {
     const now = Date.now();
     let changed = false;
     for (const id of Object.keys(all)) {
-      if (!all[id] || !all[id].key || (all[id].expires || 0) < now) {
+      /* A session needs a token OR a key — not a key.
+         The key decrypts published snapshot files. The page stopped publishing
+         those and reads the sheet live instead, so there is nothing to derive
+         a key from and unlock() now leaves it null. This line still demanded
+         one, so every session was thrown away on the very next load and the
+         password was asked for again on every reload — the storing worked
+         perfectly, the reading discarded it.
+
+         The token is what actually signs a request in, and the service expires
+         it after the same ten days, so it is the right thing to insist on. */
+      const usable = all[id] && (all[id].token || all[id].key);
+      if (!usable || (all[id].expires || 0) < now) {
         delete all[id];
         changed = true;
       }
@@ -389,6 +400,41 @@ async function loadManifest(project, key, token) {
    or the project just opened would be missing from its own menu. And the app
    is revealed last, so it is never briefly visible showing the previous
    project's name. */
+/* Empty every panel that is showing the project being left.
+
+   Clearing the variables above is not enough: what a person is looking at is
+   the DOM, and each panel is only redrawn by its own loader, which runs when
+   its tab is clicked. So switching projects while sitting on Settings left the
+   previous project's settings on screen — correct-looking, editable, and
+   belonging to a different spreadsheet — until a hard reload.
+
+   The visible panel is then reloaded immediately, because it is the one being
+   read right now; the hidden ones fill themselves in when they are opened. */
+function clearPanels() {
+  const blank = 'reading the sheet…';
+  const settings = $('settings-body');
+  if (settings) settings.innerHTML = `<p class="muted">${blank}</p>`;
+  const keywords = $('keywords-list');
+  if (keywords) keywords.innerHTML = `<p class="muted">${blank}</p>`;
+  const count = $('keywords-count');
+  if (count) count.textContent = '';
+  const runs = $('runs-body');
+  if (runs) runs.innerHTML = '';
+  const detail = $('run-detail');
+  if (detail) { detail.hidden = true; detail.innerHTML = ''; }
+  const agent = $('agent-status');
+  if (agent) agent.innerHTML = '';
+  ['data-error', 'settings-error', 'keywords-error', 'runs-error']
+    .forEach((id) => { const box = $(id); if (box) box.innerHTML = ''; });
+
+  const open = document.querySelector('nav button[aria-selected="true"]');
+  const panel = open && open.dataset.panel;
+  if (panel === 'panel-settings') loadSettings();
+  else if (panel === 'panel-keywords') loadKeywords();
+  else if (panel === 'panel-runs') loadRuns();
+  else if (panel === 'panel-setup') renderSetup();
+}
+
 async function enter(project, key, token, remember = false) {
   /* WHAT SIGNING IN WAITS FOR: the password, and nothing else.
 
@@ -420,6 +466,8 @@ async function enter(project, key, token, remember = false) {
   Object.keys(pending).forEach((key) => { delete pending[key]; });
   const savebar = $('settings-savebar');
   if (savebar) savebar.hidden = true;
+  RUN_STATE = { runs: [], agent: { online: false, everSeen: false } };
+  clearPanels();
 
   if (remember) await rememberSession(project.id, project.name, key, token);
   SESSION = (await loadSessions())[project.id] || null;
@@ -1072,8 +1120,16 @@ function renderTable() {
   const body = $('data-body');
   body.innerHTML = '';
   if (!slice.length) {
-    const tr = el('tr'), td = el('td', 'muted', 'No rows match these filters.');
-    td.colSpan = data.columns.length + 1;
+    /* Two different nothings. A tab filtered down to nothing is the viewer's
+       own doing; a tab that has never had a row in it is a project waiting for
+       its first run, and telling that person to change their filters would be
+       nonsense. The columns above are still drawn either way, so the shape of
+       what is coming is visible. */
+    const message = data.rows.length
+      ? 'No rows match these filters.'
+      : 'Nothing here yet — the columns above are what a run will fill in.';
+    const tr = el('tr'), td = el('td', 'muted', message);
+    td.colSpan = Math.max(1, data.columns.length + 1);
     tr.append(td); body.append(tr);
   }
   slice.forEach((row) => {
@@ -1894,12 +1950,17 @@ function renderSetup() {
   const branch = CFG.branch || 'main';
   $('setup-read').href =
     `https://github.com/${repo}/blob/${branch}/install.sh`;
-  // The real URL, so nobody has to be told it separately.
+  // The real URL, so nobody has to be told it separately. It is baked into
+  // the script as well; this line is for pointing at a different deployment.
   const exec = $('setup-exec');
   if (exec) {
     exec.textContent = SETTINGS_URL ||
       'ask whoever runs the project for the /exec URL';
   }
+  // What the installer prints back once the password checks out, so what the
+  // page promises and what the terminal says are the same words.
+  const named = $('setup-project');
+  if (named) named.textContent = (PROJECT && PROJECT.name) || 'this project';
 }
 
 $('setup-copy').addEventListener('click', async () => {
@@ -1976,10 +2037,18 @@ async function loadSettings() {
 async function boot() {
   const sel = $('sheet-select');
   sel.innerHTML = '';
-  // Settings has its own panel; it is not a data table.
+  /* Empty tabs are listed too.
+
+     A project that has never run has a row count of zero everywhere, and
+     filtering those out left the whole panel blank with "no worksheets" — the
+     first thing anyone saw after creating a project, and it read like a
+     failure rather than a beginning. The tabs exist and their headers say what
+     each one will hold, so show them. */
   const usable = (MANIFEST.worksheets || [])
-    .filter((w) => !w.error && w.row_count && w.name !== 'Settings');
-  usable.forEach((w) => sel.append(new Option(`${w.name} — ${w.row_count} rows`, w.name)));
+    .filter((w) => !w.error && w.name !== 'Settings' && w.name !== 'Runs');
+  usable.forEach((w) => sel.append(new Option(
+    w.row_count ? `${w.name} — ${w.row_count} rows` : `${w.name} — empty`,
+    w.name)));
 
   const captured = new Date(MANIFEST.captured_at);
   const ageHours = (Date.now() - captured) / 36e5;
@@ -2024,7 +2093,8 @@ async function boot() {
       'Signed in, but this page could not read the sheet: ' + MANIFEST.unavailable +
       ' Settings, Keywords and Runs all still work.');
   } else banner($('data-error'), 'warn', MANIFEST.live
-    ? 'This project\'s spreadsheet has no tabs with any rows in them yet.'
+    ? 'This project\'s spreadsheet has no data tabs yet. Creating a project '
+      + 'normally makes them; if this one is empty, open the sheet and check.'
     : 'The last run published no readable worksheets.');
 }
 

@@ -108,9 +108,16 @@ no port forward and no fixed address — and why closing the laptop simply means
 queued runs wait rather than fail.
 
 ```bash
-export SETTINGS_WEB_APP_URL='https://script.google.com/macros/s/…/exec'
-export PROJECT_PASSWORD='the project password'
-python agent.py                     # leave it running
+curl -fsSL https://raw.githubusercontent.com/aakashchamola/automated-scraping/automateV2/install.sh | bash
+```
+
+That is the whole setup. It asks for the project password at the end, checks it
+against the service, saves it to `.env` beside the code with mode 0600, and
+offers to start the agent. Nothing is exported, so nothing is lost when the
+terminal closes. Afterwards, and at any time:
+
+```bash
+cd ~/automated-scraping && ./.venv/bin/python agent.py   # leave it running
 ```
 
 Polling doubles as the heartbeat, so the dashboard says whether a machine is
@@ -169,8 +176,10 @@ its own.
 The machine running the pipeline needs **no Google credentials at all**:
 
 ```bash
-export SETTINGS_WEB_APP_URL='https://script.google.com/macros/s/…/exec'
-export PROJECT_PASSWORD='the project password'
+# install.sh has already written both of these to .env; env_file reads it for
+# every entry point, so this needs nothing in the shell.
+#   SETTINGS_WEB_APP_URL=https://script.google.com/macros/s/…/exec
+#   PROJECT_PASSWORD=the project password
 python main.py --config config.yaml
 ```
 
