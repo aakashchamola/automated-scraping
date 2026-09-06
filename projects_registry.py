@@ -36,6 +36,15 @@ import re
 import secrets
 from datetime import datetime, timezone
 
+# The two settings may live in a .env beside this file rather than in the
+# shell, which is how install.sh leaves a machine: asked once, saved, and never
+# typed again. Done at import so every entry point gets it — the twelve command
+# line tools all reach a store or the registry, and those are these two
+# modules.
+import env_file                                            # noqa: E402
+env_file.load_once()                                       # noqa: E402
+
+
 logger = logging.getLogger(__name__)
 
 WORKSHEET = "Projects"
