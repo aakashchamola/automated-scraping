@@ -459,6 +459,23 @@ class RemoteSheetsStore:
 
 # ── Choosing a store ─────────────────────────────────────────────────────────
 
+class NeedsGoogleKey(RuntimeError):
+    """Raised by a step that cannot be done with a password alone.
+
+    Most of the pipeline reads and writes through named calls, and those work
+    either way. Enrichment does not: it holds a live gspread worksheet to
+    colour cells, and reads the Sheets API v4 directly to recover the
+    hyperlinks behind company names. Neither has a remote equivalent — the Web
+    App deals in values, and a hyperlink is not one.
+
+    So it is a real limit rather than an oversight, and this is how it is said:
+    a named exception, so the pipeline can carry on with the steps that do work
+    and report plainly which one it left out. What it replaced was a
+    FileNotFoundError about a file the person had never heard of, thrown from
+    inside a Google library, which stopped every remaining step.
+    """
+
+
 def is_configured() -> bool:
     """True when the environment asks for the credential-free path."""
     return bool(os.environ.get("SETTINGS_WEB_APP_URL")

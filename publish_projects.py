@@ -107,6 +107,16 @@ def main() -> None:
     config = load_config(args.config)
     setup_logging_from_config(config)
 
+    import remote_store
+    if remote_store.is_configured():
+        # Not a gap — the boundary itself. Publishing reads every project's
+        # data_key out of the control sheet, and a project password is
+        # deliberately not allowed to reach it: that sheet holds every other
+        # project's key and password hash.
+        sys.exit("publishing needs the control spreadsheet, which a project "
+                 "password cannot open — by design, since it holds every "
+                 "project's keys. Run this where the Google key is.")
+
     if not projects_registry.is_enabled(config):
         sys.exit("no control spreadsheet configured (control.spreadsheet_id)")
 

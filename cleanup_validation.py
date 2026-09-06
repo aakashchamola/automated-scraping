@@ -197,6 +197,19 @@ def _format_output_path(path_template: str, now: str) -> str:
 
 
 def run_cleanup(config: dict[str, Any]) -> None:
+    import remote_store
+    if remote_store.is_configured():
+        # First, before any config is validated: what this machine can do does
+        # not depend on how the file is filled in. Portable in principle — the
+        # Web App can read a tab and delete rows — but every read below is
+        # written around a live gspread worksheet, so it is a port rather than
+        # a switch. Said plainly instead of failing on a missing file: this one
+        # names its key in its OWN config, so the path in that error was one
+        # the reader had no way to place.
+        raise remote_store.NeedsGoogleKey(
+            "cleanup-rows still needs the Google key. Run it on the machine "
+            "that holds the service-account file.")
+
     cleanup_cfg = config.get("cleanup_validation", {})
     if not isinstance(cleanup_cfg, dict):
         raise RuntimeError("cleanup_validation section must be an object.")

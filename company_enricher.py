@@ -127,6 +127,18 @@ def _set_bg(comp_ws, cell_ref: str, rgb: dict) -> None:
 
 def enrich(gs_config: dict, companies_sheet_name: str) -> None:
     import gspread
+    import remote_store
+
+    # Said here rather than eighty lines down, where it used to surface as a
+    # FileNotFoundError from inside google.auth about a path the reader has
+    # never seen.
+    if remote_store.is_configured():
+        raise remote_store.NeedsGoogleKey(
+            "enrichment is the one step a password cannot do. It colours cells "
+            "and reads the hyperlinks behind company names, and both need the "
+            "Sheets API directly rather than the Web App. Run this on the "
+            "machine that holds secrets/google-service-account.json, or run "
+            "the pipeline with --skip-enrichment.")
 
     spreadsheet_id = gs_config.get("spreadsheet_id", "")
     source_cfg = config_helpers.source_sheet_controls(gs_config)
@@ -821,7 +833,14 @@ def main() -> None:
         args.companies_sheet
         or gs_config.get("enrichment_output_worksheet", "CompaniesTest")
     )
-    enrich(gs_config, companies_sheet)
+    import remote_store
+    try:
+        enrich(gs_config, companies_sheet)
+    except remote_store.NeedsGoogleKey as exc:
+        # Run on its own, there is nothing to carry on with — so say the one
+        # sentence that matters and stop, rather than unwinding a stack.
+        logger.error(str(exc))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

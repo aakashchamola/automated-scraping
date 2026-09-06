@@ -205,17 +205,33 @@ def run_pipeline(
         ("validation", skip_validation, run_validation),
     ]
 
+    unavailable = []
     for name, skip, fn in steps:
         if skip:
             logger.info(f"Skipped: {name}")
             continue
         try:
             fn(config)
+        except remote_store.NeedsGoogleKey as exc:
+            # Not a failure: a step this machine is not equipped for. Killing
+            # the run here meant a laptop with only a password got nothing at
+            # all from "full", because enrichment happens to be step 1.
+            logger.warning(f"Skipping {name}: {exc}")
+            unavailable.append(name)
         except Exception as exc:
             logger.exception(f"Step '{name}' failed: {exc!r}")
             sys.exit(1)
 
-    logger.info("AUTOMATION PIPELINE COMPLETE")
+    if unavailable:
+        # The last line of output, because the dashboard shows the tail of it
+        # as the run's summary — a run that quietly left a step out would look
+        # exactly like one that did everything.
+        logger.warning("AUTOMATION PIPELINE COMPLETE — without "
+                       + ", ".join(unavailable)
+                       + ": that needs the Google key, and this machine has "
+                         "only a project password. Everything else ran.")
+    else:
+        logger.info("AUTOMATION PIPELINE COMPLETE")
 
 
 def parse_args() -> argparse.Namespace:
