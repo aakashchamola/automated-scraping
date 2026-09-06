@@ -313,7 +313,32 @@ def resolve(config: dict, project_id: str = None) -> dict:
     With no control sheet configured, or no project asked for and none in the
     registry, the config is left exactly as it is — which is what keeps a
     single-sheet setup working unchanged.
+
+    ── WHY A PASSWORD SKIPS ALL OF THIS ──────────────────────────────────────
+    On a machine holding only a project password there is nothing to resolve:
+    the password already chose the project, and the Web App will only ever act
+    on that one. The control sheet is not merely unavailable there, it is
+    deliberately out of reach — it lists every project and holds every data key
+    and password hash, which is precisely what a password must not reach.
+
+    Without this, every entry point died on the first line of its main(): it
+    called this before choosing a store, and this opened the control sheet with
+    the service-account key. That went unnoticed for exactly the reason it is
+    easy to miss — the machine it was developed on has the key, so the registry
+    opened fine and the run went on to use the remote store as intended. On a
+    fresh install there is no key, and all ten run modes stopped with a
+    FileNotFoundError before doing any work.
     """
+    import remote_store          # local: keeps this module importable alone
+
+    if remote_store.is_configured():
+        if project_id:
+            raise RuntimeError(
+                "--project cannot be used with PROJECT_PASSWORD: the password "
+                "already selects the project, and this machine cannot see the "
+                "list of others.")
+        return None
+
     if not is_enabled(config):
         if project_id:
             raise RuntimeError(
