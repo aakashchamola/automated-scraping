@@ -443,10 +443,20 @@ console.log('\nSettings.gs\n');
   const out = post(s, { action: 'organiseFiles', token: auth.token });
   check('it reports the folder it filed into', out.ok === true && /folder-1/.test(out.folder),
         JSON.stringify(out));
-  check('the control sheet moves', /control sheet: moved/.test(out.results.join('|')),
+  // The registry is the one file that must NOT be filed here. A file inherits
+  // its folder's sharing, this folder is shared with everyone who works on a
+  // project, and the control sheet holds every project's data_key and password
+  // hash. It used to be moved, which was one click from handing all of that to
+  // the whole team.
+  check('the control sheet is not moved',
+        !/control sheet: moved/.test(out.results.join('|')),
         out.results.join(' | '));
-  check('and it really left My Drive', !(world.parents['ctrl'] || []).includes('root'),
+  check('and it stays in My Drive, unshared',
+        (world.parents['ctrl'] || []).includes('root'),
         JSON.stringify(world.parents['ctrl']));
+  check('and it says why, rather than silently skipping it',
+        /every project's key/.test(out.results.join('|')),
+        out.results.join(' | '));
   check('a sheet you own moves', /project 'alpha': moved/.test(out.results.join('|')),
         out.results.join(' | '));
 

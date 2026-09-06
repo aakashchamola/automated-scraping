@@ -1547,7 +1547,15 @@ function _organiseFiles() {
   if (!folderId) throw new Error('PROJECTS_FOLDER_ID is not set');
   var folder = DriveApp.getFolderById(folderId);
 
-  var targets = [{ label: 'control sheet', id: _controlId() }];
+  // NEVER the control sheet.
+  //
+  // It was in this list, and that was a way to give the whole team every
+  // project's data_key and password hash in one click: a file inherits its
+  // folder's sharing, the projects folder is deliberately shared with everyone
+  // who works on a project, and the control sheet is the one file that must
+  // not be. It is the registry — it holds every project's key, every password
+  // hash, and now every organisation's registry too. It stays where it is.
+  var targets = [];
   _projects().forEach(function (p) {
     if (p.spreadsheet_id) {
       targets.push({ label: "project '" + p.id + "'", id: p.spreadsheet_id });
@@ -1571,6 +1579,9 @@ function _organiseFiles() {
       results.push(target.label + ': could not be moved — ' + err);
     }
   });
+  results.push('the control sheet was deliberately left where it is: filing it ' +
+               'here would share every project\'s key with everyone this ' +
+               'folder is shared with');
   return { folder: folder.getName(), results: results };
 }
 
