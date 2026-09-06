@@ -11,11 +11,15 @@ publishing surface, and these tests treat it as one.
 import logging
 import os
 import sys
+import traceback
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import logger_setup                                            # noqa: E402
+import agent as agent_module                                   # noqa: E402
+import remote_store                                            # noqa: E402
 
 WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         ".github", "workflows", "scheduled-pipeline.yml")
@@ -187,6 +191,74 @@ class WorkflowSaysNothingIdentifying(unittest.TestCase):
                     self.assertNotIn("-maxdepth 1 -type d -print", script)
                     self.assertNotIn("ls site/data", script)
                     self.assertNotIn("find site/data -type f | sort", script)
+
+
+class ThePasswordNeverLeavesInAMessage(unittest.TestCase):
+    """The one secret a teammate's machine holds must not be quotable.
+
+    Every read sends the password as a query parameter — a Web App's doGet has
+    no other way to be given one — and requests names the URL it tried in the
+    text of anything it raises. So an ordinary DNS blip produced an error
+    message with the password in it, and that message went three places that
+    outlive it: the agent's log file, the Runs tab of the spreadsheet, and the
+    dashboard's run detail. The last two are read by everyone the sheet is
+    shared with.
+
+    A canary rather than a pattern: a real password is whatever somebody chose,
+    so the test looks for the exact value and would fail on any encoding of it.
+    """
+
+    CANARY = "canary-Pa55 w@rd/+="
+
+    def test_a_network_failure_does_not_quote_the_password(self):
+        store = remote_store.RemoteSheetsStore(
+            "https://this-host-does-not-exist.invalid/exec", self.CANARY)
+        # No retries: this is about what the message says, not about waiting.
+        with unittest.mock.patch.object(remote_store, "RETRIES", 1):
+            with self.assertRaises(remote_store.RemoteStoreError) as caught:
+                store._request("GET", params={"action": "inputs",
+                                              "password": store.password})
+        self.assertNotIn(self.CANARY, str(caught.exception))
+        self.assertIn("password=***", str(caught.exception))
+
+    def test_nor_does_the_traceback_behind_it(self):
+        """`raise ... from exc` would print the original, unredacted, in full."""
+        store = remote_store.RemoteSheetsStore(
+            "https://this-host-does-not-exist.invalid/exec", self.CANARY)
+        with unittest.mock.patch.object(remote_store, "RETRIES", 1):
+            try:
+                store._request("GET", params={"action": "inputs",
+                                              "password": store.password})
+            except remote_store.RemoteStoreError as exc:
+                rendered = "".join(traceback.format_exception(
+                    type(exc), exc, exc.__traceback__))
+        self.assertNotIn(self.CANARY, rendered)
+
+    def test_the_percent_encoded_form_counts_too(self):
+        """A password in a URL is not the password as it was typed."""
+        cleaned = remote_store.redact(
+            "tried https://x/exec?action=rows&password=a%40b%20c", "a@b c")
+        self.assertNotIn("a%40b%20c", cleaned)
+        self.assertNotIn("a@b c", cleaned)
+
+    def test_what_the_agent_writes_to_the_sheet_is_redacted(self):
+        """A run summary is a spreadsheet cell, and cells are shared."""
+        sent = {}
+
+        class Store:
+            password = self.CANARY
+
+        class Fake(agent_module.Agent):
+            def __init__(inner):                     # noqa: N805 - test double
+                inner.store = Store()
+
+            def _post(inner, action, **fields):      # noqa: N805
+                sent.update(fields)
+                return {}
+
+        Fake().report("r1", status="failed",
+                      summary=f"boom: https://x/exec?password={self.CANARY}")
+        self.assertNotIn(self.CANARY, sent.get("summary", ""))
 
 
 if __name__ == "__main__":

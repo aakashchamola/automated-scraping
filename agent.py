@@ -136,7 +136,19 @@ class Agent:
         return reply.get("run")
 
     def report(self, run_id: str, **fields) -> bool:
-        """Send progress. Returns True when a cancellation is waiting."""
+        """Send progress. Returns True when a cancellation is waiting.
+
+        Everything sent is redacted first. A summary is the tail of whatever
+        the pipeline printed, and it does not stay on this machine — it is
+        written to the Runs tab, so it is read by everyone the spreadsheet is
+        shared with and shown on the dashboard. A traceback from any library
+        that puts a URL in its message would otherwise carry the password
+        there, and a spreadsheet cell is not a place a password can be taken
+        back out of.
+        """
+        fields = {key: remote_store.redact(value, self.store.password)
+                  if isinstance(value, str) else value
+                  for key, value in fields.items()}
         try:
             reply = self._post("updateRun", id=run_id, **fields)
             return bool(reply.get("cancelRequested"))
@@ -305,7 +317,9 @@ class Agent:
                     idle_logged = True
             except remote_store.RemoteStoreError as exc:
                 backoff = min(BACKOFF_MAX_SEC, max(self.poll_sec, backoff * 2))
-                logger.warning(f"{exc}; retrying in {backoff}s")
+                logger.warning(
+                    f"{remote_store.redact(str(exc), self.store.password)}; "
+                    f"retrying in {backoff}s")
             except Stopping:
                 break
             if once:

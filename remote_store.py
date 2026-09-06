@@ -47,6 +47,34 @@ TIMEOUT_SEC = 180
 RETRIES = 3
 BACKOFF_SEC = 5.0
 
+# Every read sends the password as a query parameter, because that is the only
+# thing a Web App's doGet can be given. requests puts the URL it tried into the
+# text of anything it raises, so a DNS blip or a 500 produced an error message
+# with the password in it — which agent.py then logged, and which reached the
+# Runs tab as a run summary and from there the spreadsheet the whole team can
+# open. Nothing leaked what was typed; the transport did.
+_PASSWORD_IN_URL = re.compile(r"([?&]password=)[^&\s\"'`)]*")
+
+
+def redact(text, password: str = "") -> str:
+    """*text* with anything that could carry the password out of here removed.
+
+    Both forms are covered: the query parameter as requests wrote it, and the
+    literal value, which arrives percent-encoded in a URL and plain in a
+    traceback. Applied to every message that leaves this module, because the
+    places it ends up — a log file, a spreadsheet cell, a browser — are all
+    read by more people than the password was given to.
+    """
+    if not text:
+        return text
+    cleaned = _PASSWORD_IN_URL.sub(r"\1***", str(text))
+    if password:
+        from urllib.parse import quote
+        for form in (password, quote(password, safe=""), quote(password)):
+            if form:
+                cleaned = cleaned.replace(form, "***")
+    return cleaned
+
 LINK_HASH_CHARS = 12
 
 # A column write is one request whatever its length, but Apps Script stops an
@@ -157,9 +185,12 @@ class RemoteSheetsStore:
             except Exception as exc:                    # network, 5xx, timeout
                 last = exc
                 if attempt == RETRIES - 1:
-                    raise RemoteStoreError(
+                    # `from None`, not `from exc`: a chained cause is printed
+                    # in full by any unhandled traceback, which would put the
+                    # unredacted URL back into the output this just cleaned.
+                    raise RemoteStoreError(redact(
                         f"could not reach the Settings service after {RETRIES} "
-                        f"attempts: {exc}") from exc
+                        f"attempts: {exc}", self.password)) from None
                 wait = BACKOFF_SEC * (2 ** attempt)
                 logger.warning(f"Settings service unreachable (attempt "
                                f"{attempt + 1}/{RETRIES}), retrying in {wait:.0f}s")
