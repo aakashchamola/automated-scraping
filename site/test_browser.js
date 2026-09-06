@@ -122,6 +122,11 @@ let STUB_SIGNED_OUT = false;
    for "sign-in awaits the tab index" to look like sign-in being broken. */
 let STUB_TABS_DELAY_MS = 0;
 
+/* Whether the deployment has an ADMIN_PASSWORD. It decides which gate the page
+   opens with: the project list when there is something to check first, the
+   password form when there is not. */
+let STUB_ADMIN_PASSWORD = '';
+
 // The queue the dashboard drives. Per project, because a run belongs to one.
 const QUEUES = { main: [], biotech: [] };
 const AGENTS = { main: { online: false, everSeen: false },
@@ -175,7 +180,18 @@ function startStub() {
     let payload;
     if (p.get('ping')) {
       payload = { ok: true, version: 4, standalone: true, activeProjects: 2,
-                  adminPasswordConfigured: false };
+                  adminPasswordConfigured: Boolean(STUB_ADMIN_PASSWORD) };
+    } else if (p.get('action') === 'projects') {
+      if (!STUB_ADMIN_PASSWORD) {
+        payload = { ok: false, needsAdminPassword: true,
+                    error: 'ADMIN_PASSWORD is not set' };
+      } else if (p.get('adminPassword') !== STUB_ADMIN_PASSWORD) {
+        payload = { ok: false, error: 'that is not the admin password' };
+      } else {
+        // Names only — never a key, a hash or a spreadsheet id.
+        payload = { ok: true, projects: Object.entries(PROJECTS).map(([id, spec]) => ({
+          id, name: spec.name, createdAt: '2026-01-01T00:00:00Z', notes: '' })) };
+      }
     } else if (p.get('action') === 'auth') {
       const given = p.get('password') || '';
       const hit = Object.entries(PROJECTS).find(([, s]) => s.password === given);
@@ -533,6 +549,88 @@ function check(label, ok, detail) {
 
     await page.click('#btn-lock');
     await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+
+    console.log('\nchoosing a project from a list');
+    /* The password used to be the only way in, and it SELECTED the project —
+       so you had to know which password went with which project before you
+       could open anything. With an admin password set, the page lists them
+       first and each still opens with its own. */
+    STUB_ADMIN_PASSWORD = 'the-admin-password';
+    await page.goto(URL_);
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 20000 });
+    check('it asks for the admin password first', await page.isHidden('#gate-form'));
+    check('and shows no project names before it is given',
+          !/LinkedIn Reachout|Biotech/.test(await page.textContent('#gate')));
+
+    await page.fill('#admin-pw', 'wrong');
+    await page.click('#admin-go');
+    await page.waitForFunction(
+      () => document.getElementById('admin-err').textContent.trim(),
+      null, { timeout: 20000 });
+    check('a wrong admin password is refused',
+          /not the admin password/i.test(await page.textContent('#admin-err')));
+    check('and still lists nothing', await page.isHidden('#picker'));
+
+    await page.fill('#admin-pw', 'the-admin-password');
+    await page.click('#admin-go');
+    await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
+    const listed = await page.textContent('#picker-list');
+    check('the right one lists every project',
+          /LinkedIn Reachout/.test(listed) && /Biotech Jobs/.test(listed), listed);
+    check('and the password form is out of the way',
+          await page.isHidden('#gate-form'));
+
+    await page.click('#picker-list .picker-item:has-text("Biotech Jobs")');
+    await page.waitForSelector('#gate-form:not([hidden])', { timeout: 15000 });
+    check('picking one asks for that project\'s password',
+          /Biotech Jobs/.test(await page.textContent('#gate-title')),
+          await page.textContent('#gate-title'));
+
+    // The password still selects the project, so the wrong one would otherwise
+    // drop you silently into somebody else's.
+    await page.fill('#gate-pw', 'main-password-1');
+    await page.click('#gate-go');
+    await page.waitForFunction(
+      () => document.getElementById('gate-err').textContent.trim(),
+      null, { timeout: 25000 });
+    check('another project\'s password is refused by name, not silently accepted',
+          /not the password for Biotech Jobs/i.test(await page.textContent('#gate-err')),
+          await page.textContent('#gate-err'));
+    check('and it did not let anyone in', await page.isHidden('#app'));
+
+    await page.click('#gate-back');
+    await page.waitForSelector('#picker:not([hidden])', { timeout: 15000 });
+    check('Back returns to the list', await page.isHidden('#gate-form'));
+
+    await page.click('#picker-list .picker-item:has-text("Biotech Jobs")');
+    await page.fill('#gate-pw', 'biotech-password-1');
+    await page.click('#gate-go');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
+    check('its own password opens it',
+          (await page.textContent('#project-name')).includes('Biotech'),
+          await page.textContent('#project-name'));
+
+    // Being handed one project password should be enough on its own.
+    await page.click('#btn-lock');
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
+    await page.click('#admin-skip');
+    await page.waitForSelector('#gate-form:not([hidden])', { timeout: 15000 });
+    await page.fill('#gate-pw', 'main-password-1');
+    await page.click('#gate-go');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
+    check('someone with only a project password can skip the list entirely',
+          (await page.textContent('#project-name')).includes('LinkedIn Reachout'));
+
+    await page.click('#btn-lock');
+    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    STUB_ADMIN_PASSWORD = '';
+
+    // With no admin password there is nothing to check, so listing every
+    // project to anyone with the URL is not the default.
+    await page.goto(URL_);
+    await page.waitForSelector('#gate-form:not([hidden])', { timeout: 20000 });
+    check('with no admin password set it goes straight to the password',
+          await page.isHidden('#admin-form') && await page.isHidden('#picker'));
 
     console.log('\nsigning in does not wait for the data');
     /* It did, and for nine seconds: reading a real spreadsheet's tab index is

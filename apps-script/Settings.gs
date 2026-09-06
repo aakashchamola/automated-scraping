@@ -887,6 +887,127 @@ function scheduledRun() {
 }
 
 
+/* ── Seeding a new project's settings ───────────────────────────────────────
+   A new project used to get a Settings tab with a header row and nothing else,
+   because the rows were written by the pipeline on its first run, from the
+   schema it owns in Python. That is backwards: the settings are what you want
+   to look at BEFORE the first run, and until then the dashboard's Settings
+   panel had nothing to show and nothing to edit.
+
+   This script cannot read the Python schema, but it does not need to — an
+   existing project's Settings tab IS that schema, already filled in. So a new
+   project is seeded from one, which also means a new project starts with the
+   house defaults rather than the bare library ones.
+
+   Values carry over; the tab NAMES do not. Those name real tabs, and the ones
+   an established project points at ("Jobs_Test", "CompaniesTest") do not exist
+   in a fresh spreadsheet, so they are reset to the tabs it actually has. */
+
+var NEW_PROJECT_TAB_SETTINGS = {
+  'google_sheets.jobs_worksheet': 'Jobs',
+  'google_sheets.enrichment_output_worksheet': 'Companies',
+  'classification.source_worksheet': 'Companies',
+  'google_sheets.company_sheet.worksheet': 'Company',
+  'scraping.keywords_source.worksheet': 'Keywords',
+  'career_pages.source_worksheet': 'Company'
+};
+
+/**
+ * Settings rows from some other project, to copy from.
+ *
+ * Any active project with a filled-in Settings tab will do — they all carry the
+ * same schema. The first one found wins; *exceptId* keeps a project from being
+ * its own template.
+ */
+function _settingsTemplateRows(exceptId) {
+  var found = null;
+  _activeProjects().forEach(function (candidate) {
+    if (found) return;
+    if (String(candidate.id) === String(exceptId)) return;
+    if (!candidate.spreadsheet_id) return;
+    try {
+      var sheet = SpreadsheetApp.openById(candidate.spreadsheet_id)
+        .getSheetByName(SHEET_NAME);
+      if (!sheet) return;
+      var values = sheet.getDataRange().getValues();
+      if (values.length > 1) found = { from: candidate.id, values: values };
+    } catch (err) {
+      // A project whose sheet cannot be opened is simply not a template.
+    }
+  });
+  return found;
+}
+
+/**
+ * Fill in a Settings tab from another project's, without touching what is
+ * already there.
+ *
+ * Only rows the target LACKS are appended, so this is safe to run on a tab
+ * somebody has already edited — and safe to run twice. Returns what it did.
+ */
+function _seedSettings(spreadsheet, exceptId) {
+  var template = _settingsTemplateRows(exceptId);
+  if (!template) {
+    return { seeded: 0, note: 'no other project has a filled-in Settings tab ' +
+             'to copy from, so this one starts empty. The pipeline fills it in ' +
+             'on its first run.' };
+  }
+
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!sheet) sheet = spreadsheet.insertSheet(SHEET_NAME);
+
+  var header = template.values[0].map(function (h) { return String(h).trim(); });
+  var keyAt = header.indexOf(KEY_COLUMN);
+  var valueAt = header.indexOf(VALUE_COLUMN);
+  if (keyAt < 0 || valueAt < 0) {
+    return { seeded: 0, note: "the template project's Settings tab has no " +
+             KEY_COLUMN + '/' + VALUE_COLUMN + ' columns' };
+  }
+
+  var existing = sheet.getDataRange().getValues();
+  var haveHeader = existing.length && existing[0].some(
+    function (v) { return String(v).trim(); });
+  if (!haveHeader) {
+    sheet.getRange(1, 1, 1, header.length).setValues([header]);
+    sheet.setFrozenRows(1);
+    existing = [header];
+  }
+
+  var already = {};
+  var existingKeyAt = existing[0].map(function (h) { return String(h).trim(); })
+    .indexOf(KEY_COLUMN);
+  if (existingKeyAt >= 0) {
+    for (var r = 1; r < existing.length; r++) {
+      var key = String(existing[r][existingKeyAt]).trim();
+      if (key) already[key] = true;
+    }
+  }
+
+  var toAdd = [];
+  for (var t = 1; t < template.values.length; t++) {
+    var row = template.values[t].map(function (c) {
+      return String(c == null ? '' : c);
+    });
+    var setting = String(row[keyAt]).trim();
+    if (!setting || already[setting]) continue;
+    if (NEW_PROJECT_TAB_SETTINGS.hasOwnProperty(setting)) {
+      row[valueAt] = NEW_PROJECT_TAB_SETTINGS[setting];
+    }
+    toAdd.push(row);
+  }
+
+  if (toAdd.length) {
+    var width = Math.max(header.length, sheet.getLastColumn());
+    toAdd.forEach(function (row) {
+      while (row.length < width) row.push('');
+    });
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, width)
+         .setValues(toAdd);
+  }
+  return { seeded: toAdd.length, from: template.from };
+}
+
+
 /**
  * Which tabs this project has, and how big they are.
  *
@@ -1727,6 +1848,7 @@ function _createProject(body) {
   var created = false;
   var url = '';
   var filedIn = '';
+  var seeded = null;
 
   if (spreadsheetId) {
     // ADOPTION IS PRIVILEGED, creation is not.
@@ -1765,6 +1887,15 @@ function _createProject(body) {
     url = fresh.getUrl();
     created = true;
     _ensureTemplateTabs(fresh);
+
+    // So the project is configurable the moment it exists, rather than after
+    // its first run. Never fatal: a project with an empty Settings tab still
+    // works, it is just less useful.
+    try {
+      seeded = _seedSettings(fresh, projectId);
+    } catch (err) {
+      seeded = { seeded: 0, note: 'could not copy the settings across: ' + err };
+    }
 
     filedIn = _fileIntoProjectsFolder(spreadsheetId);
   }
@@ -1833,6 +1964,8 @@ function _createProject(body) {
     project: projectId, name: name, spreadsheetId: spreadsheetId,
     url: url, createdSheet: created, sharedWith: shared,
     grantedTo: grantedTo,
+    // How many settings it starts with, and which project they came from.
+    settings: seeded,
     // '' when no folder is configured, the folder's name when it was filed,
     // and a 'could not file…' string when it was not — so a misconfigured
     // folder is visible rather than silently leaving sheets in My Drive.
@@ -1859,6 +1992,46 @@ function _authoriseAdmin(body) {
     return { ok: false, error: _authError(body), signedOut: true };
   }
   return { ok: true };
+}
+
+
+/**
+ * Every project, by name, for someone holding the ADMIN password.
+ *
+ * The original design had no such list on purpose: the password SELECTED the
+ * project, so opening the URL disclosed nothing — not even that a given
+ * project existed. Picking from a list is a better flow to use, and this is
+ * the trade it costs: the names are no longer secret from someone with the
+ * admin password. They are still secret from everyone else, and a name is all
+ * this returns. Opening a project still needs that project's own password.
+ *
+ * ADMIN_PASSWORD must be set. Without it there is nothing to check, and
+ * listing every project to anyone with the URL is not a default worth having.
+ */
+function _projectList(params) {
+  var admin = _adminPassword();
+  if (!admin) {
+    return { ok: false, needsAdminPassword: true, error:
+      'ADMIN_PASSWORD is not set in Script Properties, so there is nothing to ' +
+      'check before showing the list. Set one, or sign in with a project ' +
+      'password directly.' };
+  }
+  if (!_constantTimeEquals(admin, String(params.adminPassword || ''))) {
+    return { ok: false, error: 'that is not the admin password' };
+  }
+  return {
+    ok: true,
+    projects: _activeProjects().map(function (project) {
+      // Names only. Never data_key, never pw_hash, never the spreadsheet id —
+      // the admin password opens the list, not the projects.
+      return {
+        id: project.id,
+        name: project.name || project.id,
+        createdAt: project.created_at || '',
+        notes: project.notes || ''
+      };
+    })
+  };
 }
 
 
@@ -1898,6 +2071,11 @@ function doGet(e) {
         runsAs: _effectiveUser(),
         error: controlError || undefined
       };
+
+    } else if (action === 'projects') {
+      // Gated by the admin password, not by a project's — this is the step
+      // BEFORE anyone has chosen which project they are opening.
+      payload = _projectList(params);
 
     } else if (action === 'auth') {
       // Sign in: the password selects the project, then the data key and a
@@ -2113,6 +2291,9 @@ function doPost(e) {
           result = _updateRun(project, body);
         } else if (body.action === 'cancelRun') {
           result = _cancelRun(project, body);
+        } else if (body.action === 'seedSettings') {
+          result = _seedSettings(
+            SpreadsheetApp.openById(project.spreadsheet_id), project.id);
         } else if (body.action === 'saveKeywords') {
           result = _writeKeywords(project, body.keywords || []);
         } else if (!body.action || body.action === 'saveSettings') {

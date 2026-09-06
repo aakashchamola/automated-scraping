@@ -260,6 +260,9 @@ function check(label, condition, detail) {
   if (condition) { passed++; console.log('  ok   ' + label); }
   else { failed++; console.log('  FAIL ' + label + (detail ? '\n       ' + detail : '')); }
 }
+function sandboxHash(sandbox, password, salt) {
+  return sandbox._hashPassword(password, salt);
+}
 function get(sandbox, params) {
   const out = sandbox.doGet({ parameter: params }).getContent();
   return JSON.parse(out.replace(/^[A-Za-z_$][\w$]*\(/, '').replace(/\);$/, ''));
@@ -853,6 +856,102 @@ console.log('\nSettings.gs\n');
   const archived = s3.scheduledRun();
   check('an archived project is never scheduled',
         archived.indexOf('gone:') === -1, archived);
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\na new project starts configurable, not blank');
+  world.props.ADMIN_PASSWORD = 'admin-secret';
+
+  // alpha's Settings tab is the template: three rows, one of them a tab name.
+  const made = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                         name: 'Fresh One', password: 'fresh-secret-1' });
+  check('the project is created', made.ok === true, JSON.stringify(made));
+  check('and its settings are copied from an existing project',
+        made.settings && made.settings.seeded === 3 && made.settings.from === 'alpha',
+        JSON.stringify(made.settings));
+
+  const fresh = world.sheets[made.spreadsheetId].getSheetByName('Settings');
+  const rows = fresh.rows;
+  check('the header comes across', rows[0][0] === 'Group' && rows[0][1] === 'Setting');
+  check('and every setting with it', rows.length === 4, String(rows.length));
+  const valueOf = key => (rows.find(r => r[1] === key) || [])[2];
+  check('ordinary values carry over',
+        valueOf('scraping.max_pages') === '3', valueOf('scraping.max_pages'));
+  check('and so do the type and the options, so the controls still work',
+        (rows.find(r => r[1] === 'scraping.max_pages') || [])[3] === 'int' &&
+        (rows.find(r => r[1] === 'scraping.max_pages') || [])[4] === '1 - 10');
+
+  // The one thing that must NOT carry over: a tab name from another project.
+  // alpha points its jobs at Jobs_Test, which does not exist in a new sheet.
+  check("but a tab name is reset to this project's own tab",
+        valueOf('google_sheets.jobs_worksheet') === 'Jobs',
+        valueOf('google_sheets.jobs_worksheet'));
+
+  // The dashboard can do the same to a project that already exists and is empty.
+  const auth = get(s, { action: 'auth', password: 'pw-beta-secret' });
+  const betaSettings = world.sheets['sheet-b'].getSheetByName('Settings');
+  betaSettings.rows = [betaSettings.rows[0]];          // someone cleared it
+  const filled = post(s, { action: 'seedSettings', token: auth.token });
+  check('an existing empty project can be filled in too',
+        filled.ok === true && filled.seeded === 3, JSON.stringify(filled));
+
+  const again = post(s, { action: 'seedSettings', token: auth.token });
+  check('and doing it twice adds nothing', again.seeded === 0, JSON.stringify(again));
+
+  // Values already set are somebody's choices, and must survive.
+  betaSettings.rows.find(r => r[1] === 'scraping.max_pages')[2] = '9';
+  post(s, { action: 'seedSettings', token: auth.token });
+  check('an edited value is never overwritten',
+        betaSettings.rows.find(r => r[1] === 'scraping.max_pages')[2] === '9');
+
+  // The very first project has nothing to copy from, and says so.
+  const empty = makeWorld(); const s2 = buildSandbox(empty);
+  empty.props.ADMIN_PASSWORD = 'admin-secret';
+  const first = post(s2, { action: 'createProject', adminPassword: 'admin-secret',
+                           name: 'The First', password: 'first-secret-1' });
+  check('the first project of all is created anyway',
+        first.ok === true, JSON.stringify(first));
+  check('and says why it has no settings yet',
+        first.settings.seeded === 0 && /no other project/.test(first.settings.note),
+        JSON.stringify(first.settings));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\nthe project list, for someone with the admin password');
+
+  const noAdmin = get(s, { action: 'projects', adminPassword: 'anything' });
+  check('with no ADMIN_PASSWORD set there is nothing to check, so no list',
+        noAdmin.ok === false && noAdmin.needsAdminPassword === true, noAdmin.error);
+
+  world.props.ADMIN_PASSWORD = 'admin-secret';
+  const wrong = get(s, { action: 'projects', adminPassword: 'nope' });
+  check('a wrong admin password is refused',
+        wrong.ok === false && /not the admin password/.test(wrong.error));
+  const none = get(s, { action: 'projects' });
+  check('and so is no password at all', none.ok === false);
+
+  const list = get(s, { action: 'projects', adminPassword: 'admin-secret' });
+  check('the right one lists the active projects',
+        list.ok === true && list.projects.length === 2,
+        JSON.stringify(list.projects && list.projects.map(p => p.id)));
+  check('an archived project is not offered',
+        list.projects.every(p => p.id !== 'gone'));
+  check('names come across, which is the point',
+        list.projects.some(p => p.name === 'Alpha Ltd'));
+
+  // The list says WHICH projects exist. It must never say how to open one.
+  const asText = JSON.stringify(list);
+  check('but never a data key', asText.indexOf('key-alpha') === -1);
+  check('never a password hash',
+        asText.indexOf(sandboxHash(s, 'pw-alpha-secret', 'salt-alpha')) === -1);
+  check('and never the spreadsheet id', asText.indexOf('sheet-a') === -1, asText);
+
+  // A project password still opens the project; the admin password does not.
+  const viaAdmin = get(s, { action: 'settings', password: 'admin-secret' });
+  check('the admin password opens no project by itself',
+        viaAdmin.ok === false, JSON.stringify(viaAdmin));
 }
 
 {

@@ -248,12 +248,36 @@ td.rownum { color: var(--text-faint); font-family: var(--mono); font-size: 12px;
   display: flex; align-items: center; justify-content: center;
   background: var(--bg); padding: 24px;
 }
-.gate form {
+/* The picker is a third panel in the same stack, so it has to be styled the
+   same way as the two forms rather than inheriting from `form`. */
+.gate form, .gate > #picker {
   width: min(380px, 100%); background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: var(--shadow); padding: 28px;
   display: flex; flex-direction: column; gap: 14px;
 }
+.picker-list {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 46vh; overflow-y: auto;
+}
+/* Only real tokens here. The switcher once shipped invisible — white on white
+   at 1.21:1 — because its CSS named colours the page had never defined. */
+.picker-item {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
+  width: 100%; text-align: left; cursor: pointer;
+  padding: 11px 13px; font: inherit;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.picker-item:hover, .picker-item:focus-visible {
+  background: var(--accent-soft); border-color: var(--accent);
+}
+.picker-name { font-size: 14.5px; font-weight: 600; color: var(--text); }
+.picker-meta { font-size: 12.5px; color: var(--text-dim); }
+.btn.ghost {
+  background: transparent; border-color: transparent; color: var(--text-dim);
+}
+.btn.ghost:hover { background: var(--surface-2); color: var(--text); }
 .gate h2 { margin: 0; font-size: 17px; font-weight: 650; }
 .gate p { margin: 0; font-size: 13.5px; color: var(--text-dim); }
 .gate input { width: 100%; padding: 9px 11px; font-size: 15px; }

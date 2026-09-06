@@ -9,7 +9,32 @@
 <body>
 
 <div class="gate" id="gate">
-  <form id="gate-form" autocomplete="on">
+  <!-- Step one: the admin password, which shows the list of projects. Skipped
+       entirely when the deployment has no ADMIN_PASSWORD set, and skippable by
+       anyone who already knows which project they want. -->
+  <form id="admin-form" autocomplete="on" hidden>
+    <div class="lock">🔒</div>
+    <h2>Job Scraping Automation</h2>
+    <p>Enter the admin password to see the projects.</p>
+    <input type="password" id="admin-pw" placeholder="Admin password"
+           autocomplete="current-password" required>
+    <div class="err" id="admin-err"></div>
+    <button class="btn primary" type="submit" id="admin-go">Continue</button>
+    <button class="btn ghost" type="button" id="admin-skip">I have a project password</button>
+  </form>
+
+  <!-- Step two: pick one. Each still needs its own password. -->
+  <div id="picker" hidden>
+    <div class="lock">🔒</div>
+    <h2>Choose a project</h2>
+    <p>Each one opens with its own password.</p>
+    <div id="picker-list" class="picker-list"></div>
+    <button class="btn ghost" type="button" id="picker-back">Back</button>
+  </div>
+
+  <!-- Step three: that project's password. Also the whole gate when someone
+       skipped the list, or is unlocking a second project from inside. -->
+  <form id="gate-form" autocomplete="on" hidden>
     <div class="lock">🔒</div>
     <h2 id="gate-title">Job Scraping Automation</h2>
     <p id="gate-sub">Enter your project password. It decrypts the data in your browser — nothing is sent anywhere.</p>
@@ -20,6 +45,7 @@
     </label>
     <div class="err" id="gate-err"></div>
     <button class="btn primary" type="submit" id="gate-go">Unlock</button>
+    <button class="btn" type="button" id="gate-back" hidden>Back to the list</button>
     <button class="btn" type="button" id="gate-cancel" hidden>Cancel</button>
   </form>
 </div>

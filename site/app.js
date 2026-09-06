@@ -294,7 +294,7 @@ class AuthError extends Error {
    Without a reachable service there is no sign-in at all: only it knows which
    project a password belongs to, and it is the only thing holding the data
    keys. That is deliberate — see the fallback note below. */
-async function unlock(password, remember) {
+async function unlock(password, remember, picked = null) {
   let key = null;
   let project = null;
   let token = null;
@@ -308,6 +308,14 @@ async function unlock(password, remember) {
       auth = { ok: false, error: err.message, unreachable: true };
     }
     if (auth.ok) {
+      /* The password still selects the project — the list only says which
+         exist. So when one was picked, check the password opened THAT one: a
+         password that opens a different project would otherwise silently drop
+         the viewer into somebody else's, which is far worse than a refusal. */
+      if (picked && String(auth.project) !== String(picked.id)) {
+        throw new AuthError(
+          `That is not the password for ${picked.name || picked.id}.`);
+      }
       project = { id: auth.project, name: auth.name || auth.project };
       token = auth.token;
       /* The key exists ONLY to decrypt a published snapshot, and its KDF
@@ -579,19 +587,132 @@ document.addEventListener('click', (e) => {
 
 let GATE_IS_EXTRA = false;
 
+/* Which project the viewer picked from the list, if they used one. Its password
+   still has to be typed — the list says WHICH projects exist, never how to open
+   them — but knowing the choice means a wrong password can say "that is not
+   Biotech Jobs's password" instead of the useless "no project matched". */
+let PICKED = null;
+let PROJECT_CHOICES = null;
+let ADMIN_PASSWORD_SET = false;
+
+function showGateStep(step) {
+  $('admin-form').hidden = step !== 'admin';
+  $('picker').hidden = step !== 'picker';
+  $('gate-form').hidden = step !== 'password';
+  $('gate').hidden = false;
+}
+
+/* The list step exists only where there is something to check before showing
+   it. With no ADMIN_PASSWORD the deployment would be listing every project to
+   anyone with the URL, which is not a default worth having — so those
+   deployments go straight to the password, exactly as before. */
 function openGate({ extra = false, message = '' } = {}) {
   GATE_IS_EXTRA = extra;
+  PICKED = null;
   $('gate-title').textContent = extra ? 'Unlock another project' : 'Job Scraping Automation';
   $('gate-sub').textContent = extra
     ? 'Enter that project\'s password. The one you are in now stays unlocked.'
     : 'Enter your project password. It decrypts the data in your browser — nothing is sent anywhere.';
   $('gate-err').textContent = message;
+  $('admin-err').textContent = '';
   $('gate-cancel').hidden = !extra;
+  $('gate-back').hidden = true;
   $('gate-pw').value = '';
   $('app').hidden = extra ? false : true;
-  $('gate').hidden = false;
+
+  if (ADMIN_PASSWORD_SET && PROJECT_CHOICES) {
+    // Already listed once this visit; do not ask for the admin password again.
+    renderPicker();
+    showGateStep('picker');
+    return;
+  }
+  if (ADMIN_PASSWORD_SET) {
+    showGateStep('admin');
+    $('admin-pw').focus();
+    return;
+  }
+  showGateStep('password');
   $('gate-pw').focus();
 }
+
+function renderPicker() {
+  const host = $('picker-list');
+  host.innerHTML = '';
+  (PROJECT_CHOICES || []).forEach((project) => {
+    const item = el('button', 'picker-item');
+    item.type = 'button';
+    item.append(el('span', 'picker-name', project.name || project.id));
+    const meta = [];
+    if (project.notes) meta.push(project.notes);
+    if (project.createdAt) {
+      meta.push(`created ${new Date(project.createdAt).toLocaleDateString()}`);
+    }
+    if (meta.length) item.append(el('span', 'picker-meta', meta.join(' · ')));
+    item.addEventListener('click', () => {
+      PICKED = project;
+      $('gate-title').textContent = project.name || project.id;
+      $('gate-sub').textContent = 'Enter this project\'s password.';
+      $('gate-err').textContent = '';
+      $('gate-pw').value = '';
+      $('gate-back').hidden = false;
+      showGateStep('password');
+      $('gate-pw').focus();
+    });
+    host.append(item);
+  });
+  if (!PROJECT_CHOICES || !PROJECT_CHOICES.length) {
+    host.append(el('p', 'muted', 'No projects yet.'));
+  }
+}
+
+$('admin-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('admin-go');
+  const err = $('admin-err');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  err.textContent = '';
+  try {
+    const reply = await jsonp(`${SETTINGS_URL}?action=projects` +
+      `&adminPassword=${encodeURIComponent($('admin-pw').value)}`);
+    if (!reply.ok) throw new Error(reply.error || 'that is not the admin password');
+    PROJECT_CHOICES = reply.projects || [];
+    $('admin-pw').value = '';
+    renderPicker();
+    showGateStep('picker');
+  } catch (ex) {
+    err.textContent = ex.message;
+    $('admin-pw').select();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Continue';
+  }
+});
+
+/* Knowing a project password is enough on its own — the list is a convenience,
+   not a second factor. Someone who was handed one password should not need the
+   admin password too. */
+$('admin-skip').addEventListener('click', () => {
+  PICKED = null;
+  $('gate-title').textContent = 'Job Scraping Automation';
+  $('gate-sub').textContent = 'Enter your project password.';
+  $('gate-back').hidden = !PROJECT_CHOICES;
+  showGateStep('password');
+  $('gate-pw').focus();
+});
+
+$('picker-back').addEventListener('click', () => {
+  PROJECT_CHOICES = null;
+  showGateStep('admin');
+  $('admin-pw').focus();
+});
+
+$('gate-back').addEventListener('click', () => {
+  PICKED = null;
+  $('gate-err').textContent = '';
+  renderPicker();
+  showGateStep('picker');
+});
 
 $('gate-cancel').addEventListener('click', () => {
   GATE_IS_EXTRA = false;
@@ -607,7 +728,7 @@ $('gate-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Unlocking…';
   err.textContent = '';
   try {
-    await unlock($('gate-pw').value, $('gate-remember').checked);
+    await unlock($('gate-pw').value, $('gate-remember').checked, PICKED);
   } catch (ex) {
     err.textContent = (ex.name === 'OperationError' || ex.name === 'AuthError')
       ? (ex.name === 'AuthError' ? ex.message : 'No project matched that password.')
@@ -1333,14 +1454,61 @@ function settingControl(row) {
 
 function editableNow() { return Boolean(SETTINGS_URL && SESSION_TOKEN); }
 
+/* Fill an empty Settings tab from another project's.
+   Adds only what is missing, so it is safe on a tab someone has already
+   edited — and safe to press twice. */
+async function seedSettings(btn) {
+  const previous = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Copying…';
+  banner($('settings-error'), '', '');
+  try {
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'seedSettings', token: SESSION_TOKEN }),
+    });
+    // The write's reply cannot be read, so it is proved by reading back.
+    let filled = false;
+    for (let attempt = 0; attempt < 6 && !filled; attempt++) {
+      await new Promise((r) => setTimeout(r, attempt ? 1500 : 1200));
+      SETTINGS_ROWS = null;
+      await loadSettings();
+      filled = Boolean(SETTINGS_ROWS && SETTINGS_ROWS.length);
+    }
+    if (!filled) {
+      banner($('settings-error'), 'warn',
+        'Nothing was copied. This is the only project so far, so there is ' +
+        'no other Settings tab to copy from — the first run will fill it in.');
+      btn.disabled = false;
+      btn.textContent = previous;
+    }
+  } catch (err) {
+    banner($('settings-error'), 'err', `Could not copy the settings: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = previous;
+  }
+}
+
 function renderSettings() {
   const host = $('settings-body');
   host.innerHTML = '';
   for (const key of Object.keys(pending)) delete pending[key];
 
   if (!SETTINGS_ROWS || !SETTINGS_ROWS.length) {
+    /* A project created before the settings were seeded, or one whose tab was
+       cleared. The old message here told people to run "Refresh this
+       dashboard", which no longer exists and would not have helped anyway —
+       the rows come from the sheet, not from a publish. */
     host.append(el('p', 'muted',
-      'No Settings worksheet was published. Run “Refresh this dashboard”.'));
+      'This project has no settings yet. They can be copied from another ' +
+      'project — the same options, with this project\'s own tab names.'));
+    if (SETTINGS_URL && SESSION_TOKEN) {
+      const fill = el('button', 'btn primary', 'Copy the settings across');
+      fill.addEventListener('click', () => seedSettings(fill));
+      host.append(fill);
+    }
     return;
   }
 
@@ -1860,7 +2028,24 @@ async function boot() {
     : 'The last run published no readable worksheets.');
 }
 
-resume().catch(() => { /* fall through to the login form */ });
+/* Which gate to show depends on whether this deployment has an admin password
+   to check, so the ping happens first — but a remembered session must not wait
+   for it, and neither must the form when the ping is slow or the service is
+   down. Both run; whichever settles first decides what is on screen. */
+(async function start() {
+  const asked = SETTINGS_URL
+    ? jsonp(`${SETTINGS_URL}?ping=1`)
+        .then((info) => { ADMIN_PASSWORD_SET = Boolean(info.adminPasswordConfigured); })
+        .catch(() => { ADMIN_PASSWORD_SET = false; })
+    : Promise.resolve();
+
+  const resumed = await resume().catch(() => false);
+  if (resumed) return;
+
+  await asked;
+  // Nothing is open, so this is the first step rather than an extra project.
+  if ($('app').hidden) openGate();
+})();
 
 $('settings-save').addEventListener('click', saveSettings);
 $('settings-discard').addEventListener('click', () => { renderSettings(); });
