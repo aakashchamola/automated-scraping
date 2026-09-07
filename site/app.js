@@ -852,9 +852,14 @@ $('admin-skip').addEventListener('click', () => {
 
 $('picker-back').addEventListener('click', () => {
   PROJECT_CHOICES = null;
-  // Back to the organisations when there were several to choose from;
-  // otherwise there is nothing between here and the admin password.
-  if (ORG_CHOICES && ORG_CHOICES.length > 1) {
+  /* Always back to the organisations, even when there is only one.
+
+     Walking straight through a list of one is right on the way IN — it asks
+     nothing. Doing the same on the way BACK was a dead end: the only place to
+     make a second organisation is that list, so with one organisation the
+     button to add another could never be reached. Forward skips it; Back is a
+     deliberate act and lands there. */
+  if (ORG_CHOICES && ORG_CHOICES.length) {
     PICKED_ORG = null;
     renderOrgs();
     showGateStep('orgs');

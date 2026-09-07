@@ -775,11 +775,15 @@ function check(label, ok, detail) {
       null, { timeout: 20000 });
     check('and they are that organisation\'s',
           /LinkedIn Reachout/.test(await page.textContent('#picker-list')));
-    // With nothing to choose between, Back goes all the way to the password.
+    /* Back still lands on the organisations, even though the way in skipped
+       them — that list is the only place to make a second one, so skipping it
+       both ways left the button to add one unreachable. */
     await page.click('#picker-back');
+    await page.waitForSelector('#org-picker:not([hidden])', { timeout: 15000 });
+    check('and Back reaches the organisations even when there is only one',
+          await page.isVisible('#org-new'));
+    await page.click('#org-back');
     await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
-    check('and Back returns to the admin password, there being no list between',
-          await page.isHidden('#org-picker'));
 
     /* MAKING ONE. Its own registry spreadsheet is created for it, which is the
        whole point — two clients share no sheet, no folder and no list. */
@@ -787,6 +791,8 @@ function check(label, ok, detail) {
     await page.click('#admin-go');
     await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
     await page.click('#picker-back');
+    await page.waitForSelector('#org-picker:not([hidden])', { timeout: 15000 });
+    await page.click('#org-back');
     await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
     STUB_ORGS = bothOrgs;
     await page.fill('#admin-pw', 'the-admin-password');
