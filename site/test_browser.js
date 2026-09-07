@@ -21,9 +21,17 @@ const os = require('os');
 const PW = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 
 const PROJECTS = {
-  main:   { name: 'LinkedIn Reachout', password: 'main-password-1',   key: 'data-key-for-main' },
-  biotech:{ name: 'Biotech Jobs',      password: 'biotech-password-1', key: 'data-key-for-biotech' },
+  main:   { name: 'LinkedIn Reachout', password: 'main-password-1',   key: 'data-key-for-main',    org: 'default' },
+  biotech:{ name: 'Biotech Jobs',      password: 'biotech-password-1', key: 'data-key-for-biotech', org: 'second' },
 };
+
+/* The organisation tier. Two of them, so the picker is a real choice — with
+   one, the page walks straight through it, which is its own test. */
+let STUB_ORGS = [
+  { id: 'default', name: 'First Client',  folderId: 'folder-one', folder: 'Client One' },
+  { id: 'second',  name: 'Second Client', folderId: 'folder-two', folder: 'Client Two' },
+];
+let STUB_KNOWS_ORGS = true;
 
 /* ── Building the published files, the way encrypt_snapshot.py does ─────── */
 
@@ -196,6 +204,23 @@ function startStub() {
     if (p.get('ping')) {
       payload = { ok: true, version: 4, standalone: true, activeProjects: 2,
                   adminPasswordConfigured: Boolean(STUB_ADMIN_PASSWORD) };
+    } else if (p.get('action') === 'orgs') {
+      if (!STUB_KNOWS_ORGS) {
+        // A deployment older than the organisation tier, refusing by name.
+        payload = { ok: false, unknownAction: 'orgs',
+                    error: "this deployment does not know the action 'orgs'" };
+      } else if (!STUB_ADMIN_PASSWORD) {
+        payload = { ok: false, needsAdminPassword: true,
+                    error: 'ADMIN_PASSWORD is not set' };
+      } else if (p.get('adminPassword') !== STUB_ADMIN_PASSWORD) {
+        payload = { ok: false, error: 'that is not the admin password' };
+      } else {
+        // Names and folders only — never a registry id.
+        payload = { ok: true, orgs: STUB_ORGS.map((o) => ({
+          id: o.id, name: o.name, createdAt: '2026-01-01T00:00:00Z', notes: '',
+          folderId: o.folderId, folder: o.folder, folderReachable: true,
+          projects: Object.values(PROJECTS).filter((x) => x.org === o.id).length })) };
+      }
     } else if (p.get('action') === 'projects') {
       if (!STUB_ADMIN_PASSWORD) {
         payload = { ok: false, needsAdminPassword: true,
@@ -203,9 +228,13 @@ function startStub() {
       } else if (p.get('adminPassword') !== STUB_ADMIN_PASSWORD) {
         payload = { ok: false, error: 'that is not the admin password' };
       } else {
+        const wantOrg = p.get('org') || '';
         // Names only — never a key, a hash or a spreadsheet id.
-        payload = { ok: true, projects: Object.entries(PROJECTS).map(([id, spec]) => ({
-          id, name: spec.name, createdAt: '2026-01-01T00:00:00Z', notes: '' })) };
+        payload = { ok: true, projects: Object.entries(PROJECTS)
+          .filter(([, spec]) => !wantOrg || spec.org === wantOrg)
+          .map(([id, spec]) => ({
+            id, name: spec.name, createdAt: '2026-01-01T00:00:00Z', notes: '',
+            org: spec.org, orgName: (STUB_ORGS.find((o) => o.id === spec.org) || {}).name || '' })) };
       }
     } else if (p.get('action') === 'auth') {
       const given = p.get('password') || '';
@@ -635,15 +664,46 @@ function check(label, ok, detail) {
     check('a wrong admin password is refused',
           /not the admin password/i.test(await page.textContent('#admin-err')));
     check('and still lists nothing', await page.isHidden('#picker'));
+    check('nor any organisation', await page.isHidden('#org-picker'));
 
     await page.fill('#admin-pw', 'the-admin-password');
     await page.click('#admin-go');
+
+    /* THE ORGANISATION STEP. Projects belong to a client, each with its own
+       registry and its own Drive folder, so the admin password opens a list of
+       those first and the projects come from inside one. */
+    await page.waitForSelector('#org-picker:not([hidden])', { timeout: 20000 });
+    const orgs = await page.textContent('#org-list');
+    check('the admin password lists the organisations, not the projects',
+          /First Client/.test(orgs) && /Second Client/.test(orgs), orgs);
+    check('and says how much is in each and where it files',
+          /1 project/.test(orgs) && /Client Two/.test(orgs), orgs);
+    check('no project name is shown yet',
+          !/LinkedIn Reachout|Biotech Jobs/.test(orgs), orgs);
+
+    await page.click('#org-list .picker-item:has-text("Second Client")');
     await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
+    await page.waitForFunction(() =>
+      document.getElementById('picker-list').textContent.includes('Biotech'),
+      null, { timeout: 20000 });
     const listed = await page.textContent('#picker-list');
-    check('the right one lists every project',
-          /LinkedIn Reachout/.test(listed) && /Biotech Jobs/.test(listed), listed);
+    check('opening one lists only ITS projects',
+          /Biotech Jobs/.test(listed) && !/LinkedIn Reachout/.test(listed), listed);
+    check('and says which organisation you are in',
+          /Second Client/.test(await page.textContent('#picker-sub')),
+          await page.textContent('#picker-sub'));
     check('and the password form is out of the way',
           await page.isHidden('#gate-form'));
+
+    // Back goes to the organisations, since there was a choice to make.
+    await page.click('#picker-back');
+    await page.waitForSelector('#org-picker:not([hidden])', { timeout: 15000 });
+    check('Back from the projects returns to the organisations',
+          await page.isHidden('#picker'));
+    await page.click('#org-list .picker-item:has-text("Second Client")');
+    await page.waitForFunction(() =>
+      document.getElementById('picker-list').textContent.includes('Biotech'),
+      null, { timeout: 20000 });
 
     await page.click('#picker-list .picker-item:has-text("Biotech Jobs")');
     await page.waitForSelector('#gate-form:not([hidden])', { timeout: 15000 });
@@ -686,8 +746,77 @@ function check(label, ok, detail) {
     check('someone with only a project password can skip the list entirely',
           (await page.textContent('#project-name')).includes('LinkedIn Reachout'));
 
+    /* ONE ORGANISATION IS NOT A CHOICE. Most deployments have exactly one, and
+       a list of one is a step that asks nothing — so the page walks through
+       it. The tier should be invisible until there is a second. */
     await page.click('#btn-lock');
-    await page.waitForSelector('#gate:not([hidden])', { timeout: 15000 });
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
+    const bothOrgs = STUB_ORGS;
+    STUB_ORGS = [bothOrgs[0]];
+    await page.fill('#admin-pw', 'the-admin-password');
+    await page.click('#admin-go');
+    await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
+    check('with one organisation the page goes straight to its projects',
+          await page.isHidden('#org-picker'));
+    await page.waitForFunction(() =>
+      document.getElementById('picker-list').textContent.includes('LinkedIn'),
+      null, { timeout: 20000 });
+    check('and they are that organisation\'s',
+          /LinkedIn Reachout/.test(await page.textContent('#picker-list')));
+    // With nothing to choose between, Back goes all the way to the password.
+    await page.click('#picker-back');
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
+    check('and Back returns to the admin password, there being no list between',
+          await page.isHidden('#org-picker'));
+
+    /* MAKING ONE. Its own registry spreadsheet is created for it, which is the
+       whole point — two clients share no sheet, no folder and no list. */
+    await page.fill('#admin-pw', 'the-admin-password');
+    await page.click('#admin-go');
+    await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
+    await page.click('#picker-back');
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
+    STUB_ORGS = bothOrgs;
+    await page.fill('#admin-pw', 'the-admin-password');
+    await page.click('#admin-go');
+    await page.waitForSelector('#org-picker:not([hidden])', { timeout: 20000 });
+    await page.click('#org-new');
+    await page.waitForSelector('#org-form:not([hidden])', { timeout: 15000 });
+    check('a new organisation asks for a name, a folder and the admin password',
+          await page.isVisible('#org-name') && await page.isVisible('#org-folder')
+          && await page.isVisible('#org-admin'));
+    // The stub accepts the write and the page confirms by listing again, so
+    // the new one has to be in the list for this to pass.
+    STUB_ORGS = bothOrgs.concat([{ id: 'third', name: 'Third Client',
+                                   folderId: 'folder-three', folder: 'Client Three' }]);
+    await page.fill('#org-name', 'Third Client');
+    await page.fill('#org-folder', 'https://drive.google.com/drive/folders/folder-three');
+    await page.fill('#org-admin', 'the-admin-password');
+    await page.click('#org-go');
+    await page.waitForFunction(() =>
+      document.getElementById('org-list').textContent.includes('Third Client'),
+      null, { timeout: 20000 });
+    check('creating one returns to the list with it there',
+          await page.isVisible('#org-picker'));
+    STUB_ORGS = bothOrgs;
+
+    /* AN OLDER DEPLOYMENT. The script is pasted and deployed by hand, and the
+       site deploys on push, so for a while one is newer than the other. The
+       page must keep working against a service that has never heard of
+       organisations. */
+    await page.click('#org-back');
+    await page.waitForSelector('#admin-form:not([hidden])', { timeout: 15000 });
+    STUB_KNOWS_ORGS = false;
+    await page.fill('#admin-pw', 'the-admin-password');
+    await page.click('#admin-go');
+    await page.waitForSelector('#picker:not([hidden])', { timeout: 20000 });
+    const flat = await page.textContent('#picker-list');
+    check('a deployment with no organisations still lists every project',
+          /LinkedIn Reachout/.test(flat) && /Biotech Jobs/.test(flat), flat);
+    STUB_KNOWS_ORGS = true;
+
+    // Already at the gate and already signed out — the lock at the top of this
+    // block cleared the sessions, and nothing since has signed in.
     STUB_ADMIN_PASSWORD = '';
 
     // With no admin password there is nothing to check, so listing every

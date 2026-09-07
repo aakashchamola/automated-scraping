@@ -194,22 +194,194 @@ function _passwordMatches(project, given) {
 }
 
 
-/* ── The control sheet ──────────────────────────────────────────────────── */
+/* ── Organisations ──────────────────────────────────────────────────────────
+   The tier above projects, so one deployment serves more than one client.
 
-function _controlSheet() {
+   THE ROOT SHEET IS THE ONLY THING THIS SCRIPT KNOWS. CONTROL_SHEET_ID names a
+   spreadsheet in the owner's own Drive with two tabs:
+
+     Orgs      id  name  registry_sheet_id  folder_id  status  created_at  notes
+     Projects  the FIRST organisation's projects — the ones that were already
+               there before organisations existed
+
+   Each organisation row points at its own registry spreadsheet, created when
+   the organisation is, and at its own Drive folder, where its project sheets
+   are filed. So two clients share no sheet, no folder and no list: an
+   organisation is a wall, not a label.
+
+   ── WHY THE ROOT SHEET IS NEVER SHARED ─────────────────────────────────────
+   It names every organisation's registry, and each registry holds its
+   projects' data keys and password hashes. It is the one file in the system
+   that must stay in the owner's Drive alone, which is why _organiseFiles
+   refuses to file it anywhere.
+
+   ── WHY MIGRATION NEEDS NO STEPS ───────────────────────────────────────────
+   A deployment that predates this has projects in the root sheet and no Orgs
+   tab at all. The first call after the new script is pasted writes one row —
+   an organisation whose registry IS the root sheet and whose folder is the
+   PROJECTS_FOLDER_ID already configured. Nothing moves, nothing is copied, and
+   every existing password still opens the same project. Running it again finds
+   that row and does nothing.                                                */
+
+var ORGS_TAB = 'Orgs';
+var ORGS_HEADER = ['id', 'name', 'registry_sheet_id', 'folder_id', 'status',
+                   'created_at', 'notes'];
+var DEFAULT_ORG_ID = 'default';
+
+function _rootId() {
   var id = _controlId();
   if (!id) {
     throw new Error('CONTROL_SHEET_ID is not set. Project Settings -> ' +
                     'Script Properties -> add CONTROL_SHEET_ID.');
   }
-  var sheet = SpreadsheetApp.openById(id).getSheetByName(CONTROL_TAB);
-  if (!sheet) throw new Error("the control spreadsheet has no '" + CONTROL_TAB + "' tab");
+  return id;
+}
+
+/** The Orgs tab, made if it is not there yet. */
+function _orgsSheet() {
+  var spreadsheet = SpreadsheetApp.openById(_rootId());
+  var sheet = spreadsheet.getSheetByName(ORGS_TAB);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(ORGS_TAB);
+    sheet.getRange(1, 1, 1, ORGS_HEADER.length).setValues([ORGS_HEADER]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  var first = sheet.getRange(1, 1, 1, ORGS_HEADER.length).getValues()[0];
+  if (first.every(function (v) { return !String(v).trim(); })) {
+    sheet.getRange(1, 1, 1, ORGS_HEADER.length).setValues([ORGS_HEADER]);
+    sheet.setFrozenRows(1);
+  }
   return sheet;
 }
 
-/** Every project row, with its 1-based sheet row number attached. */
-function _projects() {
-  var values = _controlSheet().getDataRange().getValues();
+/** The rows of the Orgs tab, untouched by migration. */
+function _orgRows() {
+  var values = _orgsSheet().getDataRange().getValues();
+  if (values.length < 2) return [];
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var row = {};
+    for (var c = 0; c < header.length; c++) {
+      if (header[c]) row[header[c]] = String(values[r][c] == null ? '' : values[r][c]);
+    }
+    if (!String(row.id || '').trim()) continue;
+    row._row = r + 1;
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Make sure there is at least one organisation, without moving anything.
+ *
+ * Idempotent by construction: it appends only when no organisation already
+ * claims the root sheet as its registry. Someone who deletes the default row
+ * while projects remain in the root sheet gets it back, which is the right
+ * answer — those projects would otherwise become invisible and their passwords
+ * would stop working.
+ */
+function _ensureDefaultOrg() {
+  var rows = _orgRows();
+  var root = _rootId();
+  var claimsRoot = rows.some(function (org) {
+    return String(org.registry_sheet_id || '').trim() === root;
+  });
+  if (claimsRoot) return rows;
+
+  var sheet = _orgsSheet();
+  var record = {
+    id: DEFAULT_ORG_ID,
+    name: 'Default',
+    registry_sheet_id: root,
+    folder_id: _props().getProperty('PROJECTS_FOLDER_ID') || '',
+    status: 'active',
+    created_at: _now(),
+    notes: 'made automatically for the projects that existed before ' +
+           'organisations did'
+  };
+  var header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  sheet.appendRow(header.map(function (col) {
+    return record.hasOwnProperty(col) ? record[col] : '';
+  }));
+  return _orgRows();
+}
+
+function _orgs() {
+  return _ensureDefaultOrg();
+}
+
+function _activeOrgs() {
+  return _orgs().filter(function (org) {
+    return String(org.status || '').toLowerCase() !== 'archived';
+  });
+}
+
+function _orgById(id) {
+  var wanted = String(id || '').trim().toLowerCase();
+  if (!wanted) return null;
+  var found = _orgs().filter(function (org) {
+    return String(org.id).trim().toLowerCase() === wanted;
+  });
+  return found.length ? found[0] : null;
+}
+
+/** The organisation a request means, defaulting to the first active one. */
+function _orgOrFirst(id) {
+  if (String(id || '').trim()) {
+    var named = _orgById(id);
+    if (!named) throw new Error("there is no organisation '" + id + "'");
+    return named;
+  }
+  var active = _activeOrgs();
+  if (!active.length) throw new Error('there are no organisations yet');
+  return active[0];
+}
+
+
+/* ── A registry ─────────────────────────────────────────────────────────── */
+
+/**
+ * One organisation's Projects tab.
+ *
+ * The id is always passed in. It could have defaulted to the root sheet, and
+ * that is exactly the bug worth designing out: a call site that forgot to say
+ * which organisation it meant would silently read and write the FIRST one's
+ * projects. Required, so forgetting throws instead.
+ */
+function _registrySheet(sheetId) {
+  var id = String(sheetId || '').trim();
+  if (!id) throw new Error('a registry spreadsheet id is required');
+  var spreadsheet = SpreadsheetApp.openById(id);
+  var sheet = spreadsheet.getSheetByName(CONTROL_TAB);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(CONTROL_TAB);
+    sheet.getRange(1, 1, 1, CONTROL_HEADER.length).setValues([CONTROL_HEADER]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** Kept so older call sites reading "the" control sheet still make sense. */
+function _controlSheet() {
+  return _registrySheet(_rootId());
+}
+
+/** The projects of ONE organisation, each stamped with where it came from. */
+function _projectsIn(org) {
+  var registry = String(org.registry_sheet_id || '').trim();
+  if (!registry) return [];
+  var values;
+  try {
+    values = _registrySheet(registry).getDataRange().getValues();
+  } catch (err) {
+    // An organisation whose registry cannot be opened must not take the others
+    // down with it — a password belonging to a different organisation has to
+    // keep working.
+    return [];
+  }
   if (!values.length) return [];
   var header = values[0].map(function (h) { return String(h).trim(); });
   var out = [];
@@ -220,9 +392,28 @@ function _projects() {
     }
     if (!String(row.id || '').trim()) continue;
     row._row = r + 1;
+    row._org = org.id;
+    row._orgName = org.name || org.id;
+    row._registry = registry;
     out.push(row);
   }
   return out;
+}
+
+/**
+ * Every project in every organisation.
+ *
+ * The union, not one organisation's, and that is deliberate: a machine running
+ * the pipeline holds a project password and nothing else — install.sh writes
+ * exactly SETTINGS_WEB_APP_URL and PROJECT_PASSWORD — so a password must find
+ * its project without being told where to look.
+ */
+function _projects() {
+  var all = [];
+  _activeOrgs().forEach(function (org) {
+    all = all.concat(_projectsIn(org));
+  });
+  return all;
 }
 
 function _activeProjects() {
@@ -244,6 +435,13 @@ function _projectById(id) {
  *
  * Every active project is checked even after a match, so the time taken does
  * not reveal how far down the list the answer was.
+ *
+ * ── PASSWORDS ARE UNIQUE ACROSS ALL ORGANISATIONS, NOT WITHIN ONE ──────────
+ * This walks every organisation, because that is the only thing it can do with
+ * a bare password. So two organisations choosing the same project password
+ * would send one of them into the other's spreadsheet — the single worst thing
+ * that can happen here. Every path that sets a password checks against this
+ * same union: _createProject, _copyProject and changePassword.
  */
 function _projectByPassword(password) {
   if (!password) return null;
@@ -919,9 +1117,17 @@ var NEW_PROJECT_TAB_SETTINGS = {
  * same schema. The first one found wins; *exceptId* keeps a project from being
  * its own template.
  */
-function _settingsTemplateRows(exceptId) {
+function _settingsTemplateRows(exceptId, org) {
   var found = null;
-  _activeProjects().forEach(function (candidate) {
+  // Within the organisation only. Across tenants this would copy one client's
+  // tuned settings into another's brand-new project — values they never chose
+  // and cannot see the origin of. A new organisation's first project therefore
+  // starts with an empty Settings tab, which the pipeline fills on its first
+  // run, exactly as it always did.
+  var pool = org ? _projectsIn(org).filter(function (p) {
+    return String(p.status || '').toLowerCase() !== 'archived';
+  }) : _activeProjects();
+  pool.forEach(function (candidate) {
     if (found) return;
     if (String(candidate.id) === String(exceptId)) return;
     if (!candidate.spreadsheet_id) return;
@@ -945,8 +1151,8 @@ function _settingsTemplateRows(exceptId) {
  * Only rows the target LACKS are appended, so this is safe to run on a tab
  * somebody has already edited — and safe to run twice. Returns what it did.
  */
-function _seedSettings(spreadsheet, exceptId) {
-  var template = _settingsTemplateRows(exceptId);
+function _seedSettings(spreadsheet, exceptId, org) {
+  var template = _settingsTemplateRows(exceptId, org);
   if (!template) {
     return { seeded: 0, note: 'no other project has a filled-in Settings tab ' +
              'to copy from, so this one starts empty. The pipeline fills it in ' +
@@ -1453,8 +1659,11 @@ function _ensureTemplateTabs(spreadsheet) {
  * is not. But it does report, because the previous version logged the failure
  * where nobody would ever read it and left the sheet in My Drive looking fine.
  */
-function _fileIntoProjectsFolder(spreadsheetId) {
-  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+function _fileIntoProjectsFolder(spreadsheetId, folderId) {
+  // The organisation's folder when it has one; otherwise the property, which
+  // is what the first organisation inherited from the single-folder days.
+  folderId = String(folderId || '').trim() ||
+             _props().getProperty('PROJECTS_FOLDER_ID') || '';
   if (!folderId) return '';
   try {
     var file = DriveApp.getFileById(spreadsheetId);
@@ -1542,9 +1751,14 @@ function _moveIntoFolder(fileId, folder) {
  * usually cannot be moved, and that is worth saying plainly rather than
  * failing the whole run or pretending it worked.
  */
-function _organiseFiles() {
-  var folderId = _props().getProperty('PROJECTS_FOLDER_ID') || '';
-  if (!folderId) throw new Error('PROJECTS_FOLDER_ID is not set');
+function _organiseFiles(body) {
+  var fallback = _props().getProperty('PROJECTS_FOLDER_ID') || '';
+  var wanted = _orgOrFirst((body || {}).org);
+  var folderId = String(wanted.folder_id || '').trim() || fallback;
+  if (!folderId) {
+    throw new Error("organisation '" + wanted.id + "' has no folder, and " +
+                    'PROJECTS_FOLDER_ID is not set either');
+  }
   var folder = DriveApp.getFolderById(folderId);
 
   // NEVER the control sheet.
@@ -1555,8 +1769,10 @@ function _organiseFiles() {
   // who works on a project, and the control sheet is the one file that must
   // not be. It is the registry — it holds every project's key, every password
   // hash, and now every organisation's registry too. It stays where it is.
+  // One organisation at a time. Sweeping them all into one folder is exactly
+  // the mistake this tier exists to prevent.
   var targets = [];
-  _projects().forEach(function (p) {
+  _projectsIn(wanted).forEach(function (p) {
     if (p.spreadsheet_id) {
       targets.push({ label: "project '" + p.id + "'", id: p.spreadsheet_id });
     }
@@ -1582,7 +1798,7 @@ function _organiseFiles() {
   results.push('the control sheet was deliberately left where it is: filing it ' +
                'here would share every project\'s key with everyone this ' +
                'folder is shared with');
-  return { folder: folder.getName(), results: results };
+  return { folder: folder.getName(), org: wanted.id, results: results };
 }
 
 /**
@@ -1746,7 +1962,11 @@ function _copyProject(source, body) {
     notes: _plainText(String(body.notes || ('copied from ' + source.id)))
   };
 
-  var control = _controlSheet();
+  // Into the SOURCE's registry. A copy belongs to the same organisation as the
+  // thing it was copied from — whoever holds that password already reaches
+  // everything in it, so this grants nothing new, and putting it anywhere else
+  // would need a decision nobody made.
+  var control = _registrySheet(source._registry || _rootId());
   var header = control.getRange(1, 1, 1, Math.max(control.getLastColumn(), 1))
                .getValues()[0].map(function (h) { return String(h).trim(); });
   control.appendRow(header.map(function (col) {
@@ -1807,9 +2027,10 @@ function _deleteProject(project, body) {
     }
   }
 
-  // Read the row number fresh. The one on `project` came from a read that may
-  // now be stale, and deleting by a stale index would remove the wrong project.
-  var control = _controlSheet();
+  // Read the row number fresh, from the registry this project actually lives
+  // in. The one on `project` came from a read that may now be stale, and
+  // deleting by a stale index would remove the wrong project.
+  var control = _registrySheet(project._registry || _rootId());
   var values = control.getDataRange().getValues();
   var header = values[0].map(function (h) { return String(h).trim(); });
   var idAt = header.indexOf('id');
@@ -1840,6 +2061,228 @@ function _deleteProject(project, body) {
   };
 }
 
+/* ── Folder links ───────────────────────────────────────────────────────────
+   People paste what Drive gave them, not an id. Every shape below has turned
+   up in a share dialog or an address bar at some point, so all of them are
+   accepted; anything that is not recognisably a folder is refused rather than
+   stored, because a bad id is only discovered later, when a project sheet
+   quietly stays in My Drive. */
+
+function _folderIdFromLink(text) {
+  var raw = String(text == null ? '' : text).trim();
+  // A paste can arrive wrapped, or with the variable assignment still attached.
+  raw = raw.replace(/^[<'"\s]+/, '').replace(/[>'"\s,;]+$/, '');
+  if (!raw) return '';
+
+  var patterns = [
+    /\/folders\/([A-Za-z0-9_-]{10,})/,        // …/drive/folders/<id>, /u/0/ too
+    /\/drive\/u\/\d+\/folders\/([A-Za-z0-9_-]{10,})/,
+    /[?&]id=([A-Za-z0-9_-]{10,})/             // the older ?id= form
+  ];
+  for (var i = 0; i < patterns.length; i++) {
+    var hit = raw.match(patterns[i]);
+    if (hit) return hit[1];
+  }
+  // A bare id, which is what the Script Property has always held.
+  if (/^[A-Za-z0-9_-]{10,}$/.test(raw)) return raw;
+  return '';
+}
+
+/**
+ * Check a folder before it is written down.
+ *
+ * Reachability is testable; whether this account may WRITE there is not,
+ * without creating something. So it is not claimed — a folder that turns out
+ * to be read-only shows up the first time a project is filed, and
+ * _fileIntoProjectsFolder already reports that rather than throwing.
+ */
+function _checkFolder(folderId) {
+  try {
+    var folder = DriveApp.getFolderById(folderId);
+    return { ok: true, name: folder.getName() };
+  } catch (err) {
+    return { ok: false, error: 'that folder could not be opened. Check the ' +
+             'link, and that it is shared with the account this service runs ' +
+             'as.' };
+  }
+}
+
+/**
+ * Make an organisation: its own registry spreadsheet, its own folder.
+ *
+ * Admin-gated, and only admin-gated — an organisation has no password of its
+ * own. That is the point: the admin password is the door to the whole
+ * deployment, and a project password is the door to one project inside it.
+ *
+ * The registry is deliberately NOT filed into the organisation's folder. That
+ * folder is shared with whoever works on the projects, and a registry holds
+ * every one of those projects' data keys and password hashes.
+ */
+function _createOrg(body) {
+  var name = String(body.name || '').trim();
+  if (!name) throw new Error('an organisation name is required');
+
+  var folderId = _folderIdFromLink(body.folder || body.folderId || '');
+  if ((body.folder || body.folderId) && !folderId) {
+    throw new Error('that does not look like a Drive folder link. Open the ' +
+                    'folder in Drive and copy the address, or paste just the ' +
+                    'id from it.');
+  }
+  var folderName = '';
+  if (folderId) {
+    var checked = _checkFolder(folderId);
+    if (!checked.ok) throw new Error(checked.error);
+    folderName = checked.name;
+  }
+
+  var orgId = _uniqueOrgId(_slugify(body.id || name));
+  var registry = SpreadsheetApp.create('Registry — ' + name);
+  var registryId = registry.getId();
+  // _registrySheet makes the Projects tab and its header, which is the one
+  // place that knows what a registry looks like.
+  _registrySheet(registryId);
+  // A new spreadsheet arrives with a stray first sheet that nothing uses.
+  var stray = registry.getSheetByName('Sheet1');
+  if (stray && registry.getSheets().length > 1 && stray.getLastRow() === 0) {
+    registry.deleteSheet(stray);
+  }
+
+  var record = {
+    id: orgId,
+    name: _plainText(name),
+    registry_sheet_id: registryId,
+    folder_id: folderId,
+    status: 'active',
+    created_at: _now(),
+    notes: _plainText(String(body.notes || ''))
+  };
+  var orgs = _orgsSheet();
+  var header = orgs.getRange(1, 1, 1, orgs.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  orgs.appendRow(header.map(function (col) {
+    return record.hasOwnProperty(col) ? record[col] : '';
+  }));
+
+  return {
+    org: orgId, name: name, registrySheetId: registryId,
+    registryUrl: registry.getUrl(), folderId: folderId, folder: folderName,
+    note: 'the registry is in your Drive and is not shared with anyone. It ' +
+          'holds this organisation\'s project keys, so it must not be.'
+  };
+}
+
+function _uniqueOrgId(base) {
+  var candidate = base || 'org', n = 2;
+  while (_orgById(candidate)) {
+    candidate = ((base || 'org') + '-' + n).substring(0, 32);
+    n++;
+  }
+  return candidate;
+}
+
+/**
+ * Change an organisation's name or folder.
+ *
+ * Changing the folder affects WHERE THE NEXT PROJECT GOES. Sheets already
+ * created are left where they are, deliberately: moving them would change who
+ * can see them, because a file inherits its folder's sharing. Anyone who
+ * wants the old ones moved as well can say so, and organiseFiles does it as a
+ * separate, visible act.
+ */
+function _updateOrg(body) {
+  var org = _orgById(body.org || body.id || '');
+  if (!org) throw new Error("there is no organisation '" + (body.org || body.id) + "'");
+
+  var changes = {};
+  if (body.name !== undefined) {
+    var name = String(body.name).trim();
+    if (!name) throw new Error('an organisation needs a name');
+    changes.name = _plainText(name);
+  }
+  var folderName = '';
+  if (body.folder !== undefined || body.folderId !== undefined) {
+    var raw = body.folder !== undefined ? body.folder : body.folderId;
+    if (String(raw || '').trim()) {
+      var folderId = _folderIdFromLink(raw);
+      if (!folderId) {
+        throw new Error('that does not look like a Drive folder link. Open ' +
+                        'the folder in Drive and copy the address.');
+      }
+      var checked = _checkFolder(folderId);
+      if (!checked.ok) throw new Error(checked.error);
+      changes.folder_id = folderId;
+      folderName = checked.name;
+    } else {
+      changes.folder_id = '';       // cleared on purpose: back to My Drive
+    }
+  }
+  if (body.notes !== undefined) changes.notes = _plainText(String(body.notes));
+  if (body.status !== undefined) {
+    var status = String(body.status).trim().toLowerCase();
+    if (status !== 'active' && status !== 'archived') {
+      throw new Error("an organisation is either active or archived");
+    }
+    changes.status = status;
+  }
+
+  var sheet = _orgsSheet();
+  var header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  Object.keys(changes).forEach(function (field) {
+    var at = header.indexOf(field);
+    if (at >= 0) sheet.getRange(org._row, at + 1).setValue(changes[field]);
+  });
+
+  return {
+    org: org.id, changed: Object.keys(changes), folder: folderName,
+    note: changes.hasOwnProperty('folder_id')
+      ? 'new projects will be filed here. The sheets already made stay where ' +
+        'they are — moving them would change who can open them.'
+      : ''
+  };
+}
+
+/**
+ * Every organisation, for someone holding the admin password.
+ *
+ * Names, folders and how many projects each holds. Never a registry's
+ * contents: the project list is a separate, equally gated call.
+ */
+function _orgList(params) {
+  var admin = _adminPassword();
+  if (!admin) {
+    return { ok: false, needsAdminPassword: true, error:
+      'ADMIN_PASSWORD is not set in Script Properties, so there is nothing to ' +
+      'check before showing the organisations. Set one, or sign in with a ' +
+      'project password directly.' };
+  }
+  if (!_constantTimeEquals(admin, String(params.adminPassword || ''))) {
+    return { ok: false, error: 'that is not the admin password' };
+  }
+  return {
+    ok: true,
+    orgs: _activeOrgs().map(function (org) {
+      var folder = org.folder_id ? _checkFolder(org.folder_id) : null;
+      return {
+        id: org.id,
+        name: org.name || org.id,
+        createdAt: org.created_at || '',
+        notes: org.notes || '',
+        // The folder is what the admin is here to manage, so its id and
+        // whether it can be opened are both worth saying. Never the registry
+        // id: that file is the keys.
+        folderId: org.folder_id || '',
+        folder: folder ? (folder.ok ? folder.name : '') : '',
+        folderReachable: folder ? folder.ok : null,
+        projects: _projectsIn(org).filter(function (p) {
+          return String(p.status || '').toLowerCase() !== 'archived';
+        }).length
+      };
+    })
+  };
+}
+
+
 function _createProject(body) {
   var name = String(body.name || '').trim();
   if (!name) throw new Error('a project name is required');
@@ -1852,6 +2295,23 @@ function _createProject(body) {
     // The password is what selects the project, so a duplicate would make one
     // of the two permanently unreachable.
     throw new Error('another project already uses that password');
+  }
+
+  // Which organisation this belongs to decides two things and only two: the
+  // Drive folder its sheet is filed into, and the registry its row is written
+  // to. Everything else about a project is the same wherever it lives.
+  //
+  // Named, or else the organisation of whoever is asking. The dashboard's New
+  // project dialog sends a session token and no organisation, and defaulting
+  // to the FIRST one would drop a project made from inside organisation B into
+  // organisation A — a different folder, a different registry, and no sign on
+  // screen that it had happened.
+  var org;
+  if (String(body.org || '').trim()) {
+    org = _orgOrFirst(body.org);
+  } else {
+    var caller = _authorise(body);
+    org = _orgOrFirst(caller && caller._org ? caller._org : '');
   }
 
   var projectId = _uniqueId(_slugify(body.id || name));
@@ -1878,8 +2338,18 @@ function _createProject(body) {
     if (!_constantTimeEquals(_adminPassword(), String(body.adminPassword || ''))) {
       throw new Error('the admin password is not correct');
     }
+    // Not just the root sheet — EVERY registry. Adopting one as a project
+    // would expose its columns through action=rows, and those columns are
+    // every project's data_key and password hash.
     if (spreadsheetId === _controlId()) {
       throw new Error('that is the control spreadsheet, not a project');
+    }
+    var isRegistry = _orgs().some(function (candidate) {
+      return String(candidate.registry_sheet_id || '').trim() === spreadsheetId;
+    });
+    if (isRegistry) {
+      throw new Error("that is an organisation's registry, not a project. It " +
+                      'holds the keys to every project in it.');
     }
     var alreadyUsed = _projects().filter(function (p) {
       return String(p.spreadsheet_id).trim() === spreadsheetId;
@@ -1903,12 +2373,12 @@ function _createProject(body) {
     // its first run. Never fatal: a project with an empty Settings tab still
     // works, it is just less useful.
     try {
-      seeded = _seedSettings(fresh, projectId);
+      seeded = _seedSettings(fresh, projectId, org);
     } catch (err) {
       seeded = { seeded: 0, note: 'could not copy the settings across: ' + err };
     }
 
-    filedIn = _fileIntoProjectsFolder(spreadsheetId);
+    filedIn = _fileIntoProjectsFolder(spreadsheetId, org.folder_id);
   }
 
   // Whoever created the project gets a direct grant on its sheet.
@@ -1959,7 +2429,7 @@ function _createProject(body) {
     notes: _plainText(String(body.notes || ''))
   };
 
-  var control = _controlSheet();
+  var control = _registrySheet(org.registry_sheet_id);
   var header = control.getRange(1, 1, 1, Math.max(control.getLastColumn(), 1))
                .getValues()[0].map(function (h) { return String(h).trim(); });
   if (!header.length || !header[0]) {
@@ -1975,6 +2445,7 @@ function _createProject(body) {
     project: projectId, name: name, spreadsheetId: spreadsheetId,
     url: url, createdSheet: created, sharedWith: shared,
     grantedTo: grantedTo,
+    org: org.id, orgName: org.name || org.id,
     // How many settings it starts with, and which project they came from.
     settings: seeded,
     // '' when no folder is configured, the folder's name when it was filed,
@@ -2030,16 +2501,30 @@ function _projectList(params) {
   if (!_constantTimeEquals(admin, String(params.adminPassword || ''))) {
     return { ok: false, error: 'that is not the admin password' };
   }
+  // Named organisation, or every project across all of them. The unfiltered
+  // answer is what a deployment made before organisations existed expects, and
+  // what the sign-in page falls back to.
+  var pool = _activeProjects();
+  if (String(params.org || '').trim()) {
+    var org = _orgById(params.org);
+    if (!org) return { ok: false, error: "there is no organisation '" + params.org + "'" };
+    pool = _projectsIn(org).filter(function (p) {
+      return String(p.status || '').toLowerCase() !== 'archived';
+    });
+  }
   return {
     ok: true,
-    projects: _activeProjects().map(function (project) {
+    org: String(params.org || ''),
+    projects: pool.map(function (project) {
       // Names only. Never data_key, never pw_hash, never the spreadsheet id —
       // the admin password opens the list, not the projects.
       return {
         id: project.id,
         name: project.name || project.id,
         createdAt: project.created_at || '',
-        notes: project.notes || ''
+        notes: project.notes || '',
+        org: project._org || '',
+        orgName: project._orgName || ''
       };
     })
   };
@@ -2065,15 +2550,25 @@ function doGet(e) {
       } catch (err) {
         controlError = String(err);
       }
+      var orgCount = 0;
+      try {
+        orgCount = _activeOrgs().length;
+      } catch (err) {
+        // The ping must survive a root sheet that cannot be read; controlError
+        // above already says so.
+      }
       payload = {
         ok: !controlError && Boolean(controlId),
-        version: 4,
+        version: 5,
         standalone: true,
         controlSheetConfigured: Boolean(controlId),
         controlSheetReadable: Boolean(controlId) && !controlError,
         // A count, never the names: the landing page must not disclose which
         // projects exist to someone who has no password.
         activeProjects: count,
+        // A count, never the names — for the same reason as the projects
+        // above: this answers to anyone holding the URL.
+        organisations: orgCount,
         serviceAccountConfigured: Boolean(_serviceAccount()),
         adminPasswordConfigured: Boolean(_adminPassword()),
         projectsFolder: _projectsFolderStatus(),
@@ -2082,6 +2577,11 @@ function doGet(e) {
         runsAs: _effectiveUser(),
         error: controlError || undefined
       };
+
+    } else if (action === 'orgs') {
+      // The step BEFORE a project is chosen. Admin-gated, like the project
+      // list — an organisation has no password of its own.
+      payload = _orgList(params);
 
     } else if (action === 'projects') {
       // Gated by the admin password, not by a project's — this is the step
@@ -2190,8 +2690,25 @@ function doPost(e) {
       // Admin-gated: this rearranges the owner's Drive, not a project's data.
       var mayOrganise = _authoriseAdmin(body);
       return _json(mayOrganise.ok
-        ? (function () { var r = _organiseFiles(); r.ok = true; return r; })()
+        ? (function () { var r = _organiseFiles(body); r.ok = true; return r; })()
         : mayOrganise);
+    }
+
+    if (body.action === 'createOrg' || body.action === 'updateOrg') {
+      // Only the admin password opens this. An organisation has no password of
+      // its own, so there is nothing else that could.
+      var mayOrg = _authoriseAdmin(body);
+      if (!mayOrg.ok) return _json(mayOrg);
+      var orgLock = LockService.getScriptLock();
+      orgLock.waitLock(30000);
+      try {
+        var outcome = body.action === 'createOrg'
+          ? _createOrg(body) : _updateOrg(body);
+        outcome.ok = true;
+        return _json(outcome);
+      } finally {
+        orgLock.releaseLock();
+      }
     }
 
     if (body.action === 'deleteProject') {
@@ -2267,7 +2784,7 @@ function doPost(e) {
         result = { ok: false, error: 'another project already uses that password' };
       } else {
         var salt = _randomKey().substring(0, 32);
-        var control = _controlSheet();
+        var control = _registrySheet(project._registry || _rootId());
         var header = control.getRange(1, 1, 1, control.getLastColumn()).getValues()[0]
                      .map(function (h) { return String(h).trim(); });
         control.getRange(project._row, header.indexOf('pw_salt') + 1).setValue(salt);

@@ -642,9 +642,18 @@ let GATE_IS_EXTRA = false;
 let PICKED = null;
 let PROJECT_CHOICES = null;
 let ADMIN_PASSWORD_SET = false;
+/* The organisation tier. ORG_CHOICES is what the admin password bought; PICKED_ORG
+   is the one being looked inside. ADMIN_PW is held only for as long as the gate
+   is open, because listing an organisation's projects and creating things in it
+   are separate calls that each need it again. It is cleared on the way in. */
+let ORG_CHOICES = null;
+let PICKED_ORG = null;
+let ADMIN_PW = '';
 
 function showGateStep(step) {
   $('admin-form').hidden = step !== 'admin';
+  $('org-picker').hidden = step !== 'orgs';
+  $('org-form').hidden = step !== 'neworg';
   $('picker').hidden = step !== 'picker';
   $('gate-form').hidden = step !== 'password';
   $('gate').hidden = false;
@@ -674,6 +683,11 @@ function openGate({ extra = false, message = '' } = {}) {
     showGateStep('picker');
     return;
   }
+  if (ADMIN_PASSWORD_SET && ORG_CHOICES) {
+    renderOrgs();
+    showGateStep('orgs');
+    return;
+  }
   if (ADMIN_PASSWORD_SET) {
     showGateStep('admin');
     $('admin-pw').focus();
@@ -681,6 +695,53 @@ function openGate({ extra = false, message = '' } = {}) {
   }
   showGateStep('password');
   $('gate-pw').focus();
+}
+
+function renderOrgs() {
+  const host = $('org-list');
+  host.innerHTML = '';
+  (ORG_CHOICES || []).forEach((org) => {
+    const item = el('button', 'picker-item');
+    item.type = 'button';
+    item.append(el('span', 'picker-name', org.name || org.id));
+    const meta = [];
+    meta.push(`${org.projects} project${org.projects === 1 ? '' : 's'}`);
+    // Whether the folder can actually be opened is the thing most worth
+    // knowing here, because a bad one is otherwise only discovered the next
+    // time a project is created and quietly stays in My Drive.
+    if (org.folderId && org.folderReachable === false) {
+      meta.push('folder unreachable');
+    } else if (org.folder) {
+      meta.push(org.folder);
+    } else if (!org.folderId) {
+      meta.push('no folder set');
+    }
+    item.append(el('span', 'picker-meta', meta.join(' · ')));
+    item.addEventListener('click', () => openOrg(org));
+    host.append(item);
+  });
+  if (!ORG_CHOICES || !ORG_CHOICES.length) {
+    host.append(el('p', 'muted', 'No organisations yet.'));
+  }
+}
+
+async function openOrg(org) {
+  PICKED_ORG = org;
+  $('picker-sub').textContent =
+    `${org.name || org.id} — each project opens with its own password.`;
+  $('picker-list').innerHTML = '<p class="muted">reading…</p>';
+  showGateStep('picker');
+  try {
+    const reply = await jsonp(`${SETTINGS_URL}?action=projects` +
+      `&org=${encodeURIComponent(org.id)}` +
+      `&adminPassword=${encodeURIComponent(ADMIN_PW)}`);
+    if (!reply.ok) throw new Error(reply.error || 'could not list the projects');
+    PROJECT_CHOICES = reply.projects || [];
+    renderPicker();
+  } catch (ex) {
+    $('picker-list').innerHTML = '';
+    $('picker-list').append(el('p', 'err', ex.message));
+  }
 }
 
 function renderPicker() {
@@ -721,13 +782,36 @@ $('admin-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Checking…';
   err.textContent = '';
   try {
-    const reply = await jsonp(`${SETTINGS_URL}?action=projects` +
-      `&adminPassword=${encodeURIComponent($('admin-pw').value)}`);
+    const typed = $('admin-pw').value;
+    const reply = await jsonp(`${SETTINGS_URL}?action=orgs` +
+      `&adminPassword=${encodeURIComponent(typed)}`);
+    if (reply.unknownAction) {
+      /* A deployment older than the organisation tier. Fall back to the flat
+         project list, which is exactly what it still serves — so the page
+         keeps working through the window between pasting the script and
+         deploying it. */
+      const flat = await jsonp(`${SETTINGS_URL}?action=projects` +
+        `&adminPassword=${encodeURIComponent(typed)}`);
+      if (!flat.ok) throw new Error(flat.error || 'that is not the admin password');
+      ADMIN_PW = typed;
+      PROJECT_CHOICES = flat.projects || [];
+      $('admin-pw').value = '';
+      renderPicker();
+      showGateStep('picker');
+      return;
+    }
     if (!reply.ok) throw new Error(reply.error || 'that is not the admin password');
-    PROJECT_CHOICES = reply.projects || [];
+    ADMIN_PW = typed;
+    ORG_CHOICES = reply.orgs || [];
     $('admin-pw').value = '';
-    renderPicker();
-    showGateStep('picker');
+    // One organisation is not a choice. Go straight into it — the tier should
+    // be invisible until there is a second one.
+    if (ORG_CHOICES.length === 1) {
+      await openOrg(ORG_CHOICES[0]);
+      return;
+    }
+    renderOrgs();
+    showGateStep('orgs');
   } catch (ex) {
     err.textContent = ex.message;
     $('admin-pw').select();
@@ -751,8 +835,89 @@ $('admin-skip').addEventListener('click', () => {
 
 $('picker-back').addEventListener('click', () => {
   PROJECT_CHOICES = null;
+  // Back to the organisations when there were several to choose from;
+  // otherwise there is nothing between here and the admin password.
+  if (ORG_CHOICES && ORG_CHOICES.length > 1) {
+    PICKED_ORG = null;
+    renderOrgs();
+    showGateStep('orgs');
+    return;
+  }
+  ORG_CHOICES = null;
+  ADMIN_PW = '';
   showGateStep('admin');
   $('admin-pw').focus();
+});
+
+$('org-back').addEventListener('click', () => {
+  ORG_CHOICES = null;
+  ADMIN_PW = '';
+  showGateStep('admin');
+  $('admin-pw').focus();
+});
+
+$('org-new').addEventListener('click', () => {
+  $('org-name').value = '';
+  $('org-folder').value = '';
+  // Already typed once to get this far, so it is filled in — but it is asked
+  // for again rather than assumed, because this creates a spreadsheet.
+  $('org-admin').value = ADMIN_PW;
+  $('org-err').textContent = '';
+  $('org-done').hidden = true;
+  showGateStep('neworg');
+  $('org-name').focus();
+});
+
+$('org-cancel').addEventListener('click', () => {
+  renderOrgs();
+  showGateStep('orgs');
+});
+
+$('org-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('org-go');
+  const err = $('org-err');
+  err.textContent = '';
+  $('org-done').hidden = true;
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  try {
+    const name = $('org-name').value.trim();
+    if (!name) throw new Error('give it a name');
+    /* Written the way every other write here is: sent no-cors, so the reply
+       cannot be read, then confirmed by listing again. See the note on
+       postSettings — /exec sends no CORS header. */
+    await fetch(SETTINGS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'createOrg', adminPassword: $('org-admin').value,
+        name, folder: $('org-folder').value.trim(),
+      }),
+    });
+    const reply = await jsonp(`${SETTINGS_URL}?action=orgs` +
+      `&adminPassword=${encodeURIComponent($('org-admin').value)}`);
+    if (!reply.ok) throw new Error(reply.error || 'could not read the organisations back');
+    const made = (reply.orgs || []).find((o) =>
+      (o.name || '').toLowerCase() === name.toLowerCase());
+    if (!made) {
+      throw new Error('it was not created — check the folder link, and that ' +
+                      'the admin password is right');
+    }
+    ADMIN_PW = $('org-admin').value;
+    ORG_CHOICES = reply.orgs;
+    $('org-done').hidden = false;
+    $('org-done').textContent = `${name} is ready. Its projects live in a ` +
+      'spreadsheet of its own.';
+    renderOrgs();
+    showGateStep('orgs');
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create';
+  }
 });
 
 $('gate-back').addEventListener('click', () => {

@@ -15,7 +15,7 @@
   <form id="admin-form" autocomplete="on" hidden>
     <div class="lock">🔒</div>
     <h2>Job Scraping Automation</h2>
-    <p>Enter the admin password to see the projects.</p>
+    <p>Enter the admin password to see the organisations.</p>
     <input type="password" id="admin-pw" placeholder="Admin password"
            autocomplete="current-password" required>
     <div class="err" id="admin-err"></div>
@@ -23,11 +23,41 @@
     <button class="btn ghost" type="button" id="admin-skip">I have a project password</button>
   </form>
 
-  <!-- Step two: pick one. Each still needs its own password. -->
+  <!-- Step two: which organisation. No password of its own — the admin
+       password is what gates them. Skipped when there is only one. -->
+  <div id="org-picker" hidden>
+    <div class="lock">🏢</div>
+    <h2>Choose an organisation</h2>
+    <p>Each keeps its own projects, in its own Drive folder.</p>
+    <div id="org-list" class="picker-list"></div>
+    <button class="btn ghost" type="button" id="org-new">＋ New organisation</button>
+    <button class="btn ghost" type="button" id="org-back">Back</button>
+  </div>
+
+  <!-- Making one. Its own registry sheet is created for it. -->
+  <form id="org-form" autocomplete="off" hidden>
+    <div class="lock">🏢</div>
+    <h2 id="org-form-title">New organisation</h2>
+    <p id="org-form-sub">A spreadsheet is created to hold its projects. It stays
+      in your Drive and is shared with nobody.</p>
+    <input type="text" id="org-name" placeholder="Organisation name" required>
+    <input type="text" id="org-folder" placeholder="Drive folder link (optional)">
+    <p class="hint">Open the folder in Drive and copy the address. New project
+      sheets are filed there, so whoever the folder is shared with can open
+      them.</p>
+    <input type="password" id="org-admin" placeholder="Admin password"
+           autocomplete="current-password" required>
+    <div class="err" id="org-err"></div>
+    <div id="org-done" class="ok" hidden></div>
+    <button class="btn primary" type="submit" id="org-go">Create</button>
+    <button class="btn ghost" type="button" id="org-cancel">Back</button>
+  </form>
+
+  <!-- Step three: pick one. Each still needs its own password. -->
   <div id="picker" hidden>
     <div class="lock">🔒</div>
     <h2>Choose a project</h2>
-    <p>Each one opens with its own password.</p>
+    <p id="picker-sub">Each one opens with its own password.</p>
     <div id="picker-list" class="picker-list"></div>
     <button class="btn ghost" type="button" id="picker-back">Back</button>
   </div>

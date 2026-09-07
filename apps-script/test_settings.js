@@ -273,13 +273,187 @@ function post(sandbox, body) {
 
 /* ── Tests ─────────────────────────────────────────────────────────────── */
 
+{
+  const world = makeWorld(); const s = buildSandbox(world); seedProjects(s, world);
+  console.log('\norganisations');
+  world.props.ADMIN_PASSWORD = 'admin-secret';
+  world.props.PROJECTS_FOLDER_ID = 'folder-1';
+
+  /* MIGRATION. A deployment made before organisations existed has projects in
+     the root sheet and no Orgs tab at all. Nothing may move, and every
+     password must still open the same project. */
+  const listed = get(s, { action: 'orgs', adminPassword: 'admin-secret' });
+  check('an old deployment gains one organisation by itself',
+        listed.ok === true && listed.orgs.length === 1, JSON.stringify(listed));
+  check('whose folder is the one already configured',
+        listed.orgs[0].folderId === 'folder-1', JSON.stringify(listed.orgs[0]));
+  check('and it holds the projects that were already there',
+        listed.orgs[0].projects === 2, JSON.stringify(listed.orgs[0]));
+  check('a password that worked before still opens its project',
+        get(s, { action: 'auth', password: 'pw-alpha-secret' }).project === 'alpha');
+
+  const again = get(s, { action: 'orgs', adminPassword: 'admin-secret' });
+  check('running it a second time makes no second organisation',
+        again.orgs.length === 1, JSON.stringify(again.orgs.map(o => o.id)));
+
+  check('the list needs the admin password',
+        get(s, { action: 'orgs', adminPassword: 'wrong' }).ok === false);
+  check('and never gives out a registry id',
+        !/registry/i.test(JSON.stringify(listed.orgs)), JSON.stringify(listed.orgs));
+
+  /* CREATING ONE. Its own registry spreadsheet, its own folder. */
+  // Real Drive folder ids are long; the parser refuses anything too short to
+  // be one, so the fixture has to look like the real thing.
+  const FOLDER_TWO = '1SecondClientFolderAbCd';
+  const FOLDER_THREE = '1ThirdFolderMovedToXyZ';
+  world.folders.push(FOLDER_TWO);
+  const made = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                         name: 'Second Client',
+                         folder: 'https://drive.google.com/drive/folders/' + FOLDER_TWO + '?usp=sharing' });
+  check('an organisation can be created', made.ok === true, JSON.stringify(made));
+  check('with a registry spreadsheet of its own',
+        made.registrySheetId && made.registrySheetId !== 'ctrl', made.registrySheetId);
+  check('and the folder link is understood, not stored raw',
+        made.folderId === FOLDER_TWO, made.folderId);
+  check('creating one needs the admin password',
+        post(s, { action: 'createOrg', adminPassword: 'nope', name: 'X' }).ok === false);
+
+  /* A PROJECT LANDS IN THE ORGANISATION IT WAS MADE IN. */
+  const inSecond = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                             org: made.org, name: 'Second Job',
+                             password: 'second-secret-1' });
+  check('a project can be created inside it', inSecond.ok === true, JSON.stringify(inSecond));
+  check('and says which organisation it went to', inSecond.org === made.org, inSecond.org);
+  const secondRegistry = world.sheets[made.registrySheetId].getSheetByName('Projects');
+  check("its row is in that organisation's registry, not the root's",
+        secondRegistry.rows.length === 2, JSON.stringify(secondRegistry.rows.length));
+  check('and the root registry is untouched', _projectCount(world) === 3,
+        String(_projectCount(world)));
+  check("the sheet is filed into that organisation's folder",
+        (world.parents[inSecond.spreadsheetId] || []).includes(FOLDER_TWO),
+        JSON.stringify(world.parents[inSecond.spreadsheetId]));
+
+  /* THE POINT OF ALL OF IT: a password still finds its project, across
+     organisations, because a laptop holds nothing else. */
+  check('a password in the new organisation opens its project',
+        get(s, { action: 'auth', password: 'second-secret-1' }).project === inSecond.project);
+  check('and the old organisation is unaffected',
+        get(s, { action: 'auth', password: 'pw-alpha-secret' }).project === 'alpha');
+
+  /* WHICH IS WHY PASSWORDS ARE UNIQUE ACROSS ORGANISATIONS, NOT WITHIN ONE.
+     Two organisations sharing one would send someone into the wrong sheet. */
+  const clash = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                          org: 'default', name: 'Clash',
+                          password: 'second-secret-1' });
+  check('a password already used in ANOTHER organisation is refused',
+        clash.ok === false && /already uses that password/.test(clash.error || ''),
+        JSON.stringify(clash));
+
+  /* THE LISTS ARE SEPARATE. */
+  const onlySecond = get(s, { action: 'projects', adminPassword: 'admin-secret',
+                              org: made.org });
+  check('a project list can be asked for one organisation',
+        onlySecond.projects.length === 1 &&
+        onlySecond.projects[0].id === inSecond.project,
+        JSON.stringify(onlySecond.projects.map(p => p.id)));
+  const everything = get(s, { action: 'projects', adminPassword: 'admin-secret' });
+  check('and with none named it still answers for all of them',
+        everything.projects.length === 3,
+        JSON.stringify(everything.projects.map(p => p.id)));
+
+  /* CHANGING THE FOLDER. */
+  world.folders.push(FOLDER_THREE);
+  const moved = post(s, { action: 'updateOrg', adminPassword: 'admin-secret',
+                          org: made.org,
+                          folder: 'https://drive.google.com/drive/u/2/folders/' + FOLDER_THREE });
+  check('the folder can be changed later', moved.ok === true, JSON.stringify(moved));
+  check('and it says the existing sheets stay where they are',
+        /stay where they are/.test(moved.note || ''), moved.note);
+  const afterMove = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                              org: made.org, name: 'Third Job',
+                              password: 'third-secret-1' });
+  check('the next project goes to the new folder',
+        (world.parents[afterMove.spreadsheetId] || []).includes(FOLDER_THREE),
+        JSON.stringify(world.parents[afterMove.spreadsheetId]));
+  check('and the one made before it did not move',
+        (world.parents[inSecond.spreadsheetId] || []).includes(FOLDER_TWO),
+        JSON.stringify(world.parents[inSecond.spreadsheetId]));
+
+  const nonsense = post(s, { action: 'updateOrg', adminPassword: 'admin-secret',
+                             org: made.org, folder: 'not a link' });
+  check('a folder link that is not one is refused rather than stored',
+        nonsense.ok === false && /Drive folder link/.test(nonsense.error || ''),
+        JSON.stringify(nonsense));
+
+  /* A REGISTRY IS NEVER ADOPTABLE AS A PROJECT — it holds the keys. */
+  const stealRoot = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                              name: 'Sneaky', password: 'sneaky-secret-1',
+                              spreadsheetId: 'ctrl' });
+  check('the root sheet cannot be adopted as a project', stealRoot.ok === false);
+  const stealOrg = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                             name: 'Sneaky2', password: 'sneaky-secret-2',
+                             spreadsheetId: made.registrySheetId });
+  check("nor can another organisation's registry",
+        stealOrg.ok === false && /holds the keys/.test(stealOrg.error || ''),
+        JSON.stringify(stealOrg));
+
+  /* A PROJECT MADE FROM INSIDE ONE STAYS INSIDE IT. The dashboard's New
+     project dialog sends a session token and names no organisation; taking the
+     first would silently move it to another client's folder and registry. */
+  const fromInside = get(s, { action: 'auth', password: 'second-secret-1' });
+  const sibling = post(s, { action: 'createProject', token: fromInside.token,
+                            adminPassword: 'admin-secret',
+                            name: 'Made From Inside',
+                            password: 'inside-secret-1' });
+  check("a project made from inside an organisation stays in it",
+        sibling.ok === true && sibling.org === made.org,
+        JSON.stringify({ ok: sibling.ok, org: sibling.org, want: made.org }));
+
+  /* SETTINGS ARE SEEDED WITHIN AN ORGANISATION, NOT ACROSS ONE. */
+  const freshOrg = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                             name: 'Third Client' });
+  const firstOfIt = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                              org: freshOrg.org, name: 'Its First',
+                              password: 'its-first-secret-1' });
+  check("a new organisation's first project copies nobody else's settings",
+        firstOfIt.settings && firstOfIt.settings.seeded === 0,
+        JSON.stringify(firstOfIt.settings));
+}
+
+{
+  const world = makeWorld(); const s = buildSandbox(world);
+  console.log('\nfolder links, as people actually paste them');
+  const cases = [
+    ['https://drive.google.com/drive/folders/1AbC_dEfGhIjK', '1AbC_dEfGhIjK'],
+    ['https://drive.google.com/drive/folders/1AbC_dEfGhIjK?usp=sharing', '1AbC_dEfGhIjK'],
+    ['https://drive.google.com/drive/u/0/folders/1AbC_dEfGhIjK', '1AbC_dEfGhIjK'],
+    ['https://drive.google.com/open?id=1AbC_dEfGhIjK', '1AbC_dEfGhIjK'],
+    ['  https://drive.google.com/drive/folders/1AbC_dEfGhIjK  \n', '1AbC_dEfGhIjK'],
+    ['<https://drive.google.com/drive/folders/1AbC_dEfGhIjK>', '1AbC_dEfGhIjK'],
+    ['"https://drive.google.com/drive/folders/1AbC_dEfGhIjK",', '1AbC_dEfGhIjK'],
+    ['1AbC_dEfGhIjK', '1AbC_dEfGhIjK'],
+    ['', ''],
+    ['not a link at all', ''],
+    ['https://docs.google.com/spreadsheets/d/1AbC_dEfGhIjK/edit', ''],
+    ['short', ''],
+  ];
+  let wrong = [];
+  cases.forEach(([given, want]) => {
+    const got = s._folderIdFromLink(given);
+    if (got !== want) wrong.push(JSON.stringify(given) + ' -> ' + JSON.stringify(got));
+  });
+  check('every shape a share dialog produces is understood', wrong.length === 0,
+        wrong.join(' | '));
+}
+
+
 console.log('\nSettings.gs\n');
 
 {
   const world = makeWorld(); const s = buildSandbox(world);
   console.log('ping');
   const before = get(s, { ping: '1' });
-  check('reports itself standalone, version 4', before.standalone === true && before.version === 4);
+  check('reports itself standalone, version 5', before.standalone === true && before.version === 5);
   check('sees no projects in an empty registry', before.activeProjects === 0);
   seedProjects(s, world);
   const after = get(s, { ping: '1' });
@@ -474,10 +648,25 @@ console.log('\nSettings.gs\n');
         again.results.filter(r => /already there/.test(r)).length >= 2,
         again.results.join(' | '));
 
+  /* The folder now belongs to the ORGANISATION, not to a Script Property, so
+     clearing the property alone changes nothing — the default organisation
+     kept the folder it inherited. Both have to be gone before there is
+     nowhere to file into, and then it says which organisation. */
   delete world.props.PROJECTS_FOLDER_ID;
+  const stillFiled = post(s, { action: 'organiseFiles', token: auth.token });
+  check('the folder follows the organisation, not the Script Property',
+        stillFiled.ok === true, JSON.stringify(stillFiled));
+
+  // No ADMIN_PASSWORD is set in this world, so a signed-in token is the admin
+  // gate — the same rule organiseFiles above is relying on.
+  const cleared = post(s, { action: 'updateOrg', token: auth.token,
+                            org: 'default', folder: '' });
+  check('an organisation folder can be cleared', cleared.ok === true,
+        JSON.stringify(cleared));
   const unset = post(s, { action: 'organiseFiles', token: auth.token });
-  check('with no folder configured it says so',
-        unset.ok === false && /PROJECTS_FOLDER_ID/.test(unset.error), unset.error);
+  check('with no folder anywhere it says so, and names the organisation',
+        unset.ok === false && /organisation 'default'/.test(unset.error),
+        unset.error);
 }
 
 {
@@ -983,7 +1172,7 @@ console.log('\nSettings.gs\n');
         plain.getContent().charAt(0) === '{', plain.getContent().slice(0, 40));
   check('and is served as JSON', plain.mime === 'JSON', plain.mime);
   check('which parses without unwrapping anything',
-        JSON.parse(plain.getContent()).version === 4);
+        JSON.parse(plain.getContent()).version === 5);
 
   // A callback name is interpolated into javascript, so it may only ever be a
   // bare identifier.
