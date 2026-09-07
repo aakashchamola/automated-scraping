@@ -158,6 +158,22 @@ class RemoteSheetsStore:
 
     # ── Transport ─────────────────────────────────────────────────────────────
 
+    def _identify(self, params: dict) -> dict:
+        """*params* with this project named, when the machine knows its name.
+
+        A password used to have to identify a project by itself, which is why
+        two projects were once forbidden from sharing one. They are not any
+        more: install.sh writes PROJECT_ID beside the password, so this says
+        which project it means and the service checks the password against
+        that one alone. Without it the service still searches, and refuses
+        rather than guesses if more than one matches.
+        """
+        project = os.environ.get("PROJECT_ID", "").strip()
+        if project:
+            params = dict(params)
+            params["project"] = project
+        return params
+
     def _request(self, method: str, expect: str = "", **kwargs):
         """Call the Web App and return the parsed reply.
 
@@ -179,8 +195,9 @@ class RemoteSheetsStore:
         for attempt in range(RETRIES):
             try:
                 if method == "GET":
-                    response = requests.get(self.exec_url, timeout=TIMEOUT_SEC,
-                                            params=kwargs.get("params"))
+                    response = requests.get(
+                        self.exec_url, timeout=TIMEOUT_SEC,
+                        params=self._identify(kwargs.get("params") or {}))
                 else:
                     response = requests.post(
                         self.exec_url, timeout=TIMEOUT_SEC,

@@ -492,5 +492,42 @@ class ChoosingAStore(unittest.TestCase):
         self.assertFalse(remote_store.is_configured())
 
 
+
+class NamingTheProject(unittest.TestCase):
+    """A password no longer has to identify a project on its own.
+
+    Two projects may share one — install.sh writes PROJECT_ID beside the
+    password, and that is what tells them apart. Without it the service still
+    searches, and refuses rather than guesses when more than one matches.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get("PROJECT_ID")
+        os.environ.pop("PROJECT_ID", None)
+
+    def tearDown(self):
+        os.environ.pop("PROJECT_ID", None)
+        if self._saved is not None:
+            os.environ["PROJECT_ID"] = self._saved
+
+    def test_the_project_is_sent_when_the_machine_knows_it(self):
+        store = remote_store.RemoteSheetsStore("https://x/exec", "pw")
+        os.environ["PROJECT_ID"] = "designing"
+        self.assertEqual(store._identify({"action": "rows"})["project"],
+                         "designing")
+
+    def test_and_left_out_when_it_does_not(self):
+        store = remote_store.RemoteSheetsStore("https://x/exec", "pw")
+        self.assertNotIn("project", store._identify({"action": "rows"}))
+
+    def test_the_caller_s_params_are_not_mutated(self):
+        """The same dict is reused by retries; adding to it would compound."""
+        store = remote_store.RemoteSheetsStore("https://x/exec", "pw")
+        os.environ["PROJECT_ID"] = "designing"
+        given = {"action": "rows"}
+        store._identify(given)
+        self.assertNotIn("project", given)
+
+
 if __name__ == "__main__":
     unittest.main()

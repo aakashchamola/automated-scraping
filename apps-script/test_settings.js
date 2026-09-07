@@ -345,9 +345,30 @@ function post(sandbox, body) {
   const clash = post(s, { action: 'createProject', adminPassword: 'admin-secret',
                           org: 'default', name: 'Clash',
                           password: 'second-secret-1' });
-  check('a password already used in ANOTHER organisation is refused',
-        clash.ok === false && /already uses that password/.test(clash.error || ''),
-        JSON.stringify(clash));
+  check('two organisations may use the same project password',
+        clash.ok === true, JSON.stringify(clash));
+  check('and the reply names who else it opens',
+        (clash.passwordAlsoOpens || []).length === 1,
+        JSON.stringify(clash.passwordAlsoOpens));
+  /* THE POINT. A password shared by two projects can no longer say which one
+     is meant, so it is refused rather than opening one of them at random —
+     and the way out is named. */
+  const ambiguous = get(s, { action: 'auth', password: 'second-secret-1' });
+  check('and a password on its own then opens NEITHER',
+        ambiguous.ok === false && /2 projects use that password/.test(ambiguous.error || ''),
+        JSON.stringify(ambiguous));
+  check('while naming the project opens exactly that one',
+        get(s, { action: 'auth', password: 'second-secret-1',
+                 project: inSecond.project }).project === inSecond.project);
+  check('and naming the other one opens the other',
+        get(s, { action: 'auth', password: 'second-secret-1',
+                 project: clash.project }).project === clash.project);
+  check('a right password for the WRONG project is refused by name',
+        /not the password for/.test(
+          get(s, { action: 'auth', password: 'pw-alpha-secret',
+                   project: inSecond.project }).error || ''),
+        JSON.stringify(get(s, { action: 'auth', password: 'pw-alpha-secret',
+                                project: inSecond.project })));
 
   /* THE LISTS ARE SEPARATE. */
   const onlySecond = get(s, { action: 'projects', adminPassword: 'admin-secret',
@@ -358,7 +379,7 @@ function post(sandbox, body) {
         JSON.stringify(onlySecond.projects.map(p => p.id)));
   const everything = get(s, { action: 'projects', adminPassword: 'admin-secret' });
   check('and with none named it still answers for all of them',
-        everything.projects.length === 3,
+        everything.projects.length === 4,
         JSON.stringify(everything.projects.map(p => p.id)));
 
   /* CHANGING THE FOLDER. */
@@ -400,7 +421,10 @@ function post(sandbox, body) {
   /* A PROJECT MADE FROM INSIDE ONE STAYS INSIDE IT. The dashboard's New
      project dialog sends a session token and names no organisation; taking the
      first would silently move it to another client's folder and registry. */
-  const fromInside = get(s, { action: 'auth', password: 'second-secret-1' });
+  // Named, because that password now opens two projects on purpose — which is
+  // the very thing being demonstrated a few lines above.
+  const fromInside = get(s, { action: 'auth', password: 'second-secret-1',
+                              project: inSecond.project });
   const sibling = post(s, { action: 'createProject', token: fromInside.token,
                             adminPassword: 'admin-secret',
                             name: 'Made From Inside',
@@ -552,9 +576,18 @@ console.log('\nSettings.gs\n');
   const dup = post(s, { action: 'createProject', token: auth.token,
                         name: 'Gamma Industries', password: 'another-secret-9' });
   check('a duplicate name gets a distinct id', dup.project === 'gamma-industries-2');
+  /* A REUSED PASSWORD IS ALLOWED, AND SAID OUT LOUD.
+     It used to be refused, because a bare password was the only way in and had
+     to identify a project on its own. Every caller now names the project it
+     means, so two clients choosing the same password is their business — but
+     the one path that still searches cannot tell them apart, so the reply says
+     who else it opens. */
   const clash = post(s, { action: 'createProject', token: auth.token,
                           name: 'Delta', password: 'gamma-secret-1' });
-  check('a reused password is refused', clash.ok === false && /already uses/.test(clash.error));
+  check('a reused password is allowed now that callers name the project',
+        clash.ok === true, JSON.stringify(clash));
+  check('and the reply says who else that password opens',
+        (clash.passwordAlsoOpens || []).length === 1, JSON.stringify(clash.passwordAlsoOpens));
   const short = post(s, { action: 'createProject', token: auth.token, name: 'Eps', password: 'short' });
   check('a short password is refused', short.ok === false);
   const anon = post(s, { action: 'createProject', name: 'Nope', password: 'whatever-1' });
@@ -1493,7 +1526,9 @@ console.log('\nSettings.gs\n');
 
   const dup = post(s, { action: 'copyProject', token: auth.token, name: 'Dup',
                         password: 'pw-beta-secret' });
-  check('a password another project uses is refused', dup.ok === false);
+  check('a password another project uses is allowed, and reported',
+        dup.ok === true && (dup.passwordAlsoOpens || []).length === 1,
+        JSON.stringify({ ok: dup.ok, also: dup.passwordAlsoOpens }));
 }
 
 {
@@ -1565,15 +1600,28 @@ console.log('\nSettings.gs\n');
   const noCurrent = post(s, { token: auth.token, action: 'changePassword',
                               currentPassword: 'wrong', newPassword: 'a-new-secret' });
   check('the current password is always required', noCurrent.ok === false);
-  const taken = post(s, { token: auth.token, action: 'changePassword',
-                          currentPassword: 'pw-alpha-secret', newPassword: 'pw-beta-secret' });
-  check('another project\'s password cannot be taken', taken.ok === false);
+
   const done = post(s, { token: auth.token, action: 'changePassword',
                          currentPassword: 'pw-alpha-secret', newPassword: 'a-new-secret' });
   check('the change succeeds', done.ok === true && done.sessionsRevoked === true);
   check('the old session is revoked', get(s, { token: auth.token }).ok === false);
   const again = get(s, { action: 'auth', password: 'a-new-secret' });
   check('the new password works', again.ok === true && again.project === 'alpha');
+  /* Taking a password another project already uses is allowed now — every
+     caller names the project it means — and the reply says who else it opens,
+     because the one path that still searches cannot tell them apart. */
+  const taken = post(s, { token: again.token, action: 'changePassword',
+                          currentPassword: 'a-new-secret',
+                          newPassword: 'pw-beta-secret' });
+  check("another project's password can be taken, and it says who else it opens",
+        taken.ok === true && (taken.passwordAlsoOpens || []).length === 1,
+        JSON.stringify({ ok: taken.ok, also: taken.passwordAlsoOpens }));
+  check('and that password alone then opens neither of them',
+        get(s, { action: 'auth', password: 'pw-beta-secret' }).ok === false);
+  check('while naming one opens exactly it',
+        get(s, { action: 'auth', password: 'pw-beta-secret', project: 'alpha' })
+          .project === 'alpha');
+
   check('and the data key is unchanged, so published files still decrypt',
         again.dataKey === 'key-alpha');
   check('the old password no longer works',

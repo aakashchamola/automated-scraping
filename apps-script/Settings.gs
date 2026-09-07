@@ -443,13 +443,31 @@ function _projectById(id) {
  * that can happen here. Every path that sets a password checks against this
  * same union: _createProject, _copyProject and changePassword.
  */
-function _projectByPassword(password) {
-  if (!password) return null;
-  var found = null;
+function _projectsByPassword(password) {
+  if (!password) return [];
+  var found = [];
   _activeProjects().forEach(function (p) {
-    if (_passwordMatches(p, password) && found === null) found = p;
+    // Every project is checked even after a match, so the time taken does not
+    // reveal how far down the list the answer was.
+    if (_passwordMatches(p, password)) found.push(p);
   });
   return found;
+}
+
+/**
+ * The one project a password opens, or null when that is not a question with
+ * one answer.
+ *
+ * Null for none AND for more than one. Taking the first of several is how a
+ * password would silently open somebody else's project, and it is the only
+ * reason passwords ever had to be unique. They no longer do: every caller
+ * names the project it means — the dashboard because it was picked from a
+ * list, a machine because install.sh wrote PROJECT_ID beside the password —
+ * and this bare form is the fallback for when nobody said.
+ */
+function _projectByPassword(password) {
+  var found = _projectsByPassword(password);
+  return found.length === 1 ? found[0] : null;
 }
 
 
@@ -512,6 +530,25 @@ function _revokeProjectTokens(projectId) {
  * A live token is the normal path; the password is accepted directly so that a
  * caller which has not signed in yet still works in one round trip.
  */
+/**
+ * Who else already uses this password, for saying so — not for refusing.
+ *
+ * It used to be a hard refusal, on the grounds that a bare password had to
+ * identify a project on its own. It does not any more: the dashboard opens a
+ * project it picked from a list, and a machine has PROJECT_ID beside the
+ * password. Two clients choosing "summer2026" is now their business.
+ *
+ * It is still worth saying, because the ONE path that still searches — a
+ * password typed with nothing else — cannot tell them apart and will say so
+ * rather than guess.
+ */
+function _passwordSharedWith(password, exceptId) {
+  return _projectsByPassword(password)
+    .filter(function (p) { return String(p.id) !== String(exceptId || ''); })
+    .map(function (p) { return p.name || p.id; });
+}
+
+
 function _authorise(params) {
   var viaToken = _tokenProject(params.token || '');
   if (viaToken) {
@@ -522,8 +559,41 @@ function _authorise(params) {
       return project;
     }
   }
+
+  // A NAMED PROJECT IS CHECKED ON ITS OWN.
+  //
+  // The dashboard picks from a list, so it knows which project it is opening
+  // before a password is typed; a machine has PROJECT_ID beside the password
+  // in its .env. In both cases the question is "is this the password for THIS
+  // project", which has one answer and needs no comparison with anything else.
+  // Only when nobody says does it fall back to searching.
+  var named = String(params.project || '').trim();
+  if (named) {
+    var wanted = _projectById(named);
+    if (!wanted) return null;
+    if (String(wanted.status || '').toLowerCase() === 'archived') return null;
+    return _passwordMatches(wanted, params.password || '') ? wanted : null;
+  }
+
   return _projectByPassword(params.password || '');
 }
+
+/**
+ * The project a sign-in is for. Password only — never a token.
+ *
+ * Signing in is what MAKES a token, so accepting one here would let a session
+ * for one project mint a fresh one without the password ever being typed.
+ */
+function _authoriseByPassword(params) {
+  var named = String(params.project || '').trim();
+  if (named) {
+    var wanted = _projectById(named);
+    if (!wanted || String(wanted.status || '').toLowerCase() === 'archived') return null;
+    return _passwordMatches(wanted, params.password || '') ? wanted : null;
+  }
+  return _projectByPassword(params.password || '');
+}
+
 
 /** Why a request was refused, so a setup mistake reads as a setup mistake. */
 function _authError(params) {
@@ -535,6 +605,22 @@ function _authError(params) {
     return 'the control sheet lists no active projects';
   }
   if (!(params.password || params.token)) return 'no password sent';
+
+  var named = String(params.project || '').trim();
+  if (named) {
+    var wanted = _projectById(named);
+    if (!wanted) return "there is no project '" + named + "'";
+    return 'that is not the password for ' + (wanted.name || wanted.id);
+  }
+
+  // Ambiguity is a refusal, not a coin toss, and it is worth saying how to
+  // resolve it — the answer is a line in a file, not a new password.
+  var matches = _projectsByPassword(params.password || '');
+  if (matches.length > 1) {
+    return matches.length + ' projects use that password, so it does not say ' +
+      'which one you mean. Open it from the list instead, or add PROJECT_ID ' +
+      'to the .env beside your password.';
+  }
   return 'no project matched that password';
 }
 
@@ -1861,9 +1947,7 @@ function _copyProject(source, body) {
     throw new Error('the password must be at least ' + MIN_PASSWORD_LENGTH +
                     ' characters');
   }
-  if (_projectByPassword(password)) {
-    throw new Error('another project already uses that password');
-  }
+  var passwordAlsoOpens = _passwordSharedWith(password);
   if (!source.spreadsheet_id) {
     throw new Error("project '" + source.id + "' has no spreadsheet to copy");
   }
@@ -1975,6 +2059,7 @@ function _copyProject(source, body) {
 
   return {
     project: projectId, name: name, spreadsheetId: spreadsheetId,
+    passwordAlsoOpens: passwordAlsoOpens,
     url: copy.getUrl(), copiedFrom: source.id, filedIn: filedIn,
     grantedTo: grantedTo, sharedWith: shared,
     cleared: cleared, keptResults: Boolean(body.includeResults)
@@ -2291,11 +2376,9 @@ function _createProject(body) {
     throw new Error('the password must be at least ' + MIN_PASSWORD_LENGTH +
                     ' characters');
   }
-  if (_projectByPassword(password)) {
-    // The password is what selects the project, so a duplicate would make one
-    // of the two permanently unreachable.
-    throw new Error('another project already uses that password');
-  }
+  // Not refused. See _passwordSharedWith: a duplicate no longer hides anything,
+  // it only means a password typed with nothing else cannot tell them apart.
+  var passwordAlsoOpens = _passwordSharedWith(password);
 
   // Which organisation this belongs to decides two things and only two: the
   // Drive folder its sheet is filed into, and the registry its row is written
@@ -2446,6 +2529,9 @@ function _createProject(body) {
     url: url, createdSheet: created, sharedWith: shared,
     grantedTo: grantedTo,
     org: org.id, orgName: org.name || org.id,
+    // Empty almost always. When it is not, the person deserves to know that a
+    // password typed on its own can no longer tell these apart.
+    passwordAlsoOpens: passwordAlsoOpens,
     // How many settings it starts with, and which project they came from.
     settings: seeded,
     // '' when no folder is configured, the folder's name when it was filed,
@@ -2589,9 +2675,12 @@ function doGet(e) {
       payload = _projectList(params);
 
     } else if (action === 'auth') {
-      // Sign in: the password selects the project, then the data key and a
-      // token bound to that project are handed over.
-      var project = _projectByPassword(params.password || '');
+      /* Sign in.
+         With `project` given — which is what the dashboard sends, because it
+         picked one from a list — the password is checked against THAT project
+         and nothing else. Without it, the password has to identify a project
+         on its own, which it can only do when exactly one uses it. */
+      var project = _authoriseByPassword(params);
       if (!project) {
         payload = { ok: false, error: _authError(params) };
       } else if (!project.data_key) {
@@ -2780,8 +2869,6 @@ function doPost(e) {
         // caller already holds a valid token — otherwise a borrowed session
         // could lock its owner out.
         result = { ok: false, error: 'the current password is not correct' };
-      } else if (_projectByPassword(next)) {
-        result = { ok: false, error: 'another project already uses that password' };
       } else {
         var salt = _randomKey().substring(0, 32);
         var control = _registrySheet(project._registry || _rootId());
@@ -2792,7 +2879,8 @@ function doPost(e) {
                .setValue(_hashPassword(next, salt));
         _revokeProjectTokens(project.id);   // every existing session is now stale
         result = { ok: true, changed: true, sessionsRevoked: true,
-                   project: project.id };
+                   project: project.id,
+                   passwordAlsoOpens: _passwordSharedWith(next, project.id) };
       }
 
     } else {

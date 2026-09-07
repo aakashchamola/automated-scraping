@@ -313,16 +313,26 @@ async function unlock(password, remember, picked = null) {
   if (SETTINGS_URL) {
     let auth = null;
     try {
-      auth = await jsonp(
-        `${SETTINGS_URL}?action=auth&password=${encodeURIComponent(password)}`);
+      /* Say which project this is for, when one was picked.
+
+         The list already named it, so the only question is whether this is
+         ITS password — not "which project does this password happen to open",
+         which is a different and much worse question. It is also what stops
+         two projects from having to invent different passwords: they only
+         ever had to because a password typed on its own was expected to
+         identify one. */
+      const naming = picked ? `&project=${encodeURIComponent(picked.id)}` : '';
+      auth = await jsonp(`${SETTINGS_URL}?action=auth` +
+        `&password=${encodeURIComponent(password)}${naming}`);
     } catch (err) {
       auth = { ok: false, error: err.message, unreachable: true };
     }
     if (auth.ok) {
-      /* The password still selects the project — the list only says which
-         exist. So when one was picked, check the password opened THAT one: a
-         password that opens a different project would otherwise silently drop
-         the viewer into somebody else's, which is far worse than a refusal. */
+      /* Belt as well as braces. The service was told which project this is
+         for and checks the password against that one alone, so this can only
+         fire against a deployment too old to have been told — and there,
+         opening somebody else's project silently is exactly what must not
+         happen. */
       if (picked && String(auth.project) !== String(picked.id)) {
         throw new AuthError(
           `That is not the password for ${picked.name || picked.id}.`);
@@ -344,9 +354,16 @@ async function unlock(password, remember, picked = null) {
       } catch (noSnapshot) {
         key = null;
       }
-    } else if (auth.error && /no project matched|no password sent/i.test(auth.error)) {
-      // The service is working and says no. Believe it.
-      throw new AuthError('No project matched that password.');
+    } else if (auth.error && /no project matched|no password sent|not the password for|projects use that password|there is no project/i.test(auth.error)) {
+      /* The service is working and says no. Believe it — and repeat what it
+         said, rather than replacing it with something vaguer. It knows which
+         project was asked for, so it can say "that is not the password for
+         Biotech Jobs", or that the password opens more than one and which
+         line to add. Flattening all of that to "no project matched" threw away
+         the only part that tells anyone what to do next. */
+      const said = String(auth.error).trim();
+      throw new AuthError(said.charAt(0).toUpperCase() + said.slice(1) +
+        (/[.!?]$/.test(said) ? '' : '.'));
     }
     // Anything else — service unreachable, properties not configured yet, a
     // deployment mid-change — must not brick the page. Fall through.

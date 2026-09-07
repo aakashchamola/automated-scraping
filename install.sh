@@ -146,8 +146,14 @@ fi
 
 # Checks a password against the service, printing nothing that came back from
 # it. Exit 0 good, 1 refused, 2 could not tell.
+# Set by check_password when the service says which project the password opens.
+CHECKED_PROJECT_ID=""
+
 check_password() {
-    ./.venv/bin/python - "$1" "$2" <<'PY' >&2
+    # Captured rather than piped: a pipeline's exit status is the LAST
+    # command's, and this function's whole job is to report the python's.
+    local out rc=0
+    out=$(./.venv/bin/python - "$1" "$2" <<'PY'
 import sys
 try:
     import requests
@@ -171,10 +177,19 @@ except Exception as exc:
     sys.exit(2)
 if payload.get("ok"):
     print(f"  opens: {payload.get('name') or payload.get('project')}")
+    # The id, on its own line, for the caller to save. Naming the project is
+    # what lets two of them share a password without either becoming
+    # unreachable.
+    print(f"PROJECT_ID={payload.get('project') or ''}")
     sys.exit(0)
 print("  that password did not open any project")
 sys.exit(1)
 PY
+    ) || rc=$?
+    # Everything except the machine-readable line is for the person reading.
+    printf '%s\n' "$out" | grep -v '^PROJECT_ID=' >&2 || true
+    CHECKED_PROJECT_ID=$(printf '%s\n' "$out" | sed -n 's/^PROJECT_ID=//p' | head -1)
+    return $rc
 }
 
 step "Your project password"
@@ -216,9 +231,13 @@ if [ -n "$PASSWORD" ]; then
     ( umask 077
       {
         printf '# Written by install.sh. This machine needs no Google key —\n'
-        printf '# only these two lines, which reach one project and nothing else.\n'
+        printf '# only these lines, which reach one project and nothing else.\n'
         printf 'SETTINGS_WEB_APP_URL=%s\n' "$EXEC_URL"
         printf 'PROJECT_PASSWORD=%s\n' "$PASSWORD"
+        # Which project, so the password never has to identify one by
+        # itself. Two projects may share a password; this tells them apart.
+        [ -n "$CHECKED_PROJECT_ID" ] && \
+          printf 'PROJECT_ID=%s\n' "$CHECKED_PROJECT_ID"
       } > .env )
     chmod 600 .env 2>/dev/null || true
     ok "saved to $TARGET/.env (readable only by you)"

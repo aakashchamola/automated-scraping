@@ -125,6 +125,11 @@ class Agent:
 
     def _post(self, action: str, **fields):
         body = {"action": action, "password": self.store.password}
+        # Which project this is, when the machine was told — so a password two
+        # projects happen to share still reaches the right one.
+        project = os.environ.get("PROJECT_ID", "").strip()
+        if project:
+            body["project"] = project
         body.update(fields)
         return self.store._request("POST", data=json.dumps(body))
 

@@ -238,11 +238,21 @@ function startStub() {
       }
     } else if (p.get('action') === 'auth') {
       const given = p.get('password') || '';
-      const hit = Object.entries(PROJECTS).find(([, s]) => s.password === given);
+      const named = p.get('project') || '';
+      // Named, and the password is checked against THAT project alone — which
+      // is what lets two projects share one. Unnamed, it has to search.
+      const hit = named
+        ? (PROJECTS[named] && PROJECTS[named].password === given
+            ? [named, PROJECTS[named]] : undefined)
+        : Object.entries(PROJECTS).find(([, s]) => s.password === given);
       payload = hit
         ? { ok: true, project: hit[0], name: hit[1].name, dataKey: hit[1].key,
             token: 'token-' + hit[0], ttlMs: 864e6 }
-        : { ok: false, error: 'no project matched that password' };
+        // Named, so the refusal can say WHICH project it is not the password
+        // for — the same words the real service uses.
+        : { ok: false, error: named && PROJECTS[named]
+              ? 'that is not the password for ' + PROJECTS[named].name
+              : 'no project matched that password' };
     } else {
       const id = (p.get('token') || '').replace('token-', '');
       const spec = PROJECTS[id];
@@ -718,6 +728,8 @@ function check(label, ok, detail) {
     await page.waitForFunction(
       () => document.getElementById('gate-err').textContent.trim(),
       null, { timeout: 25000 });
+    check('the service was told which project, so it checked that one',
+          !/LinkedIn Reachout/.test(await page.textContent('#project-name') || ''));
     check('another project\'s password is refused by name, not silently accepted',
           /not the password for Biotech Jobs/i.test(await page.textContent('#gate-err')),
           await page.textContent('#gate-err'));
