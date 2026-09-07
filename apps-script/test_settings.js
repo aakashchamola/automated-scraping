@@ -75,8 +75,16 @@ function buildSandbox(world) {
   // which is what Drive does when the file lives in someone else's Drive.
   const makeFolder = (id) => ({
     getId: () => id,
-    getName: () => (id === 'root' ? 'My Drive' : 'Projects (' + id + ')'),
+    getName: () => world.folderNames[id]
+      || (id === 'root' ? 'My Drive' : 'Projects (' + id + ')'),
     getEditors: () => (world.folderEditors[id] || []).map(e => ({ getEmail: () => e })),
+    addEditor(email) {
+      if (world.unshareable.includes(id)) {
+        throw new Error('cannot share a folder you do not own');
+      }
+      world.folderEditors[id] = [...new Set([...(world.folderEditors[id] || []), email])];
+      return this;
+    },
     getViewers: () => (world.folderViewers[id] || []).map(e => ({ getEmail: () => e })),
     addFile(f) {
       const fid = f.getId();
@@ -89,6 +97,24 @@ function buildSandbox(world) {
       }
       const fid = f.getId();
       world.parents[fid] = (world.parents[fid] || []).filter(p => p !== id);
+    },
+    // Sub-folders, so an organisation can be given one of its own.
+    createFolder(name) {
+      if (world.readonlyParents.includes(id)) {
+        throw new Error('cannot create in a folder you cannot write to');
+      }
+      const child = 'folder-' + (++world.folderSeq) + '-' + name.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      world.folders.push(child);
+      world.folderNames[child] = name;
+      world.folderParents[child] = id;
+      return makeFolder(child);
+    },
+    getFoldersByName(name) {
+      const hits = world.folders.filter(f =>
+        world.folderParents[f] === id && world.folderNames[f] === name);
+      let i = 0;
+      return { hasNext: () => i < hits.length, next: () => makeFolder(hits[i++]) };
     },
   });
 
@@ -215,7 +241,9 @@ function makeWorld() {
                   filed: [], names: {}, created: 0,
                   parents: {}, readonlyParents: [],
                   viewers: {}, trashed: {}, untrashable: [],
-                  folderEditors: {}, folderViewers: {} };
+                  folderEditors: {}, folderViewers: {},
+                  folderNames: {}, folderParents: {}, folderSeq: 0,
+                  unshareable: [] };
 
   const project = (id, jobs) => new FakeSpreadsheet(id, [
     new FakeSheet('Settings', [
@@ -278,6 +306,9 @@ function post(sandbox, body) {
   console.log('\norganisations');
   world.props.ADMIN_PASSWORD = 'admin-secret';
   world.props.PROJECTS_FOLDER_ID = 'folder-1';
+  // The root sheet lives in a folder of its own — the database folder.
+  world.folders.push('db-folder');
+  world.parents['ctrl'] = ['db-folder'];
 
   /* MIGRATION. A deployment made before organisations existed has projects in
      the root sheet and no Orgs tab at all. Nothing may move, and every
@@ -313,6 +344,16 @@ function post(sandbox, body) {
   check('an organisation can be created', made.ok === true, JSON.stringify(made));
   check('with a registry spreadsheet of its own',
         made.registrySheetId && made.registrySheetId !== 'ctrl', made.registrySheetId);
+  /* THE DATABASE FOLDER. A registry holds every project key and password hash
+     in its organisation, so where it lands matters as much as what is in it.
+     It goes beside the root sheet — whatever folder that is in IS the database
+     folder — rather than loose at the top of My Drive. */
+  check("the registry is filed beside the root sheet, not left loose",
+        (world.parents[made.registrySheetId] || []).includes('db-folder'),
+        JSON.stringify(world.parents[made.registrySheetId]));
+  check('and it is not put in the projects folder, which is shared',
+        !(world.parents[made.registrySheetId] || []).includes(FOLDER_TWO),
+        JSON.stringify(world.parents[made.registrySheetId]));
   check('and the folder link is understood, not stored raw',
         made.folderId === FOLDER_TWO, made.folderId);
   check('creating one needs the admin password',
@@ -417,6 +458,111 @@ function post(sandbox, body) {
   check("nor can another organisation's registry",
         stealOrg.ok === false && /holds the keys/.test(stealOrg.error || ''),
         JSON.stringify(stealOrg));
+
+  /* A FOLDER OF ITS OWN, MADE FOR IT. Pasting a link per organisation is a
+     step that can be got wrong, and the commonest way to get it wrong is to
+     paste the LAST organisation's folder — which puts two clients' sheets in
+     front of each other. */
+  world.folders.push('orgs-parent');
+  world.folderNames['orgs-parent'] = 'Organisations';
+  world.props.ORGS_PARENT_FOLDER_ID = 'orgs-parent';
+
+  const auto = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                         name: 'Made Its Own' });
+  check('with no link given, a folder is made for the organisation',
+        auto.ok === true && auto.folderMade && auto.folderMade.made === true,
+        JSON.stringify(auto.folderMade));
+  check('named after it, inside the parent',
+        auto.folder === 'Made Its Own' &&
+        world.folderParents[auto.folderId] === 'orgs-parent',
+        JSON.stringify({ folder: auto.folder, parent: world.folderParents[auto.folderId] }));
+
+  const inAuto = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                           org: auto.org, name: 'Auto Job',
+                           password: 'auto-secret-1' });
+  check("and the organisation's projects are filed into it",
+        (world.parents[inAuto.spreadsheetId] || []).includes(auto.folderId),
+        JSON.stringify(world.parents[inAuto.spreadsheetId]));
+
+  /* Twice must not make two folders of the same name — Drive allows it, and
+     then nothing can say which one a sheet went into. */
+  const again2 = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                           name: 'Made Its Own' });
+  check('making one of the same name again reuses the folder',
+        again2.folderId === auto.folderId && again2.folderMade.made === false,
+        JSON.stringify({ first: auto.folderId, second: again2.folderId }));
+
+  /* A LINK STILL WINS. An organisation whose files already live somewhere
+     should keep living there. */
+  world.folders.push('1AlreadyHasAFolderXyz');
+  const pinned = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                           name: 'Has One Already',
+                           folder: 'https://drive.google.com/drive/folders/1AlreadyHasAFolderXyz' });
+  check('a folder link given by hand is used instead of making one',
+        pinned.folderId === '1AlreadyHasAFolderXyz' && !pinned.folderMade,
+        JSON.stringify({ id: pinned.folderId, made: pinned.folderMade }));
+
+  /* THE PEOPLE IT BELONGS TO CAN OPEN IT. A folder nobody in the organisation
+     can open is a folder that does them no good — and the grant goes on the
+     FOLDER, so a project made next month needs no second act. */
+  const withOwner = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                              name: 'Has An Owner',
+                              ownerEmail: 'lead@client.example' });
+  check("the organisation's owner is given the folder",
+        withOwner.grantedTo === 'lead@client.example',
+        JSON.stringify(withOwner.grantedTo));
+  check('and Drive really has them on it',
+        (world.folderEditors[withOwner.folderId] || []).includes('lead@client.example'),
+        JSON.stringify(world.folderEditors[withOwner.folderId]));
+
+  const projectAfter = post(s, { action: 'createProject', adminPassword: 'admin-secret',
+                                 org: withOwner.org, name: 'Later Job',
+                                 password: 'later-secret-1' });
+  check('so a project made afterwards is inside a folder they already hold',
+        (world.parents[projectAfter.spreadsheetId] || []).includes(withOwner.folderId),
+        JSON.stringify(world.parents[projectAfter.spreadsheetId]));
+
+  const badEmail = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                             name: 'Bad Email', ownerEmail: 'not-an-address' });
+  check('an address that is not one is refused before anything is made',
+        badEmail.ok === false && /email address/.test(badEmail.error || ''),
+        JSON.stringify(badEmail));
+
+  // A share that fails must not lose the organisation with it.
+  world.unshareable.push('orgs-parent');
+  const cannotShare = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                                name: 'Cannot Share',
+                                folder: 'https://drive.google.com/drive/folders/orgs-parent',
+                                ownerEmail: 'nope@client.example' });
+  check('an organisation still gets made when the share fails',
+        cannotShare.ok === true, JSON.stringify(cannotShare));
+  check('and it says the sharing is what did not work',
+        /could not share the folder/.test(cannotShare.grantedTo || ''),
+        cannotShare.grantedTo);
+  world.unshareable = [];
+
+  /* AND WHEN THE PARENT IS NOT USABLE, IT SAYS SO. */
+  world.props.ORGS_PARENT_FOLDER_ID = 'no-such-folder';
+  const noParent = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                             name: 'No Parent' });
+  check('an unreachable parent folder is reported, not silently ignored',
+        noParent.ok === true && noParent.folderId === '' &&
+        /ORGS_PARENT_FOLDER_ID/.test(noParent.folderMade.note || ''),
+        JSON.stringify(noParent.folderMade));
+  world.props.ORGS_PARENT_FOLDER_ID = 'orgs-parent';
+
+  /* AND IT SAYS SO WHEN THAT FOLDER IS NOT PRIVATE. Keeping the database
+     apart is the entire reason for a separate folder, so a folder with other
+     people in it has to be said out loud rather than quietly used. */
+  world.folderEditors['db-folder'] = ['someone@example.com', 'other@example.com'];
+  const warned = post(s, { action: 'createOrg', adminPassword: 'admin-secret',
+                           name: 'Fourth Client' });
+  check('a shared database folder is warned about, by name and count',
+        /WARNING/.test(warned.note || '') && /2 other people/.test(warned.note || ''),
+        warned.note);
+  check('and it says what it exposes',
+        /password hashes/.test(warned.note || ''), warned.note);
+  world.folderEditors['db-folder'] = [];
 
   /* A PROJECT MADE FROM INSIDE ONE STAYS INSIDE IT. The dashboard's New
      project dialog sends a session token and names no organisation; taking the

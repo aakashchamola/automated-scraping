@@ -881,6 +881,7 @@ $('org-back').addEventListener('click', () => {
 $('org-new').addEventListener('click', () => {
   $('org-name').value = '';
   $('org-folder').value = '';
+  $('org-email').value = '';
   // Already typed once to get this far, so it is filled in — but it is asked
   // for again rather than assumed, because this creates a spreadsheet.
   $('org-admin').value = ADMIN_PW;
@@ -916,6 +917,7 @@ $('org-form').addEventListener('submit', async (e) => {
       body: JSON.stringify({
         action: 'createOrg', adminPassword: $('org-admin').value,
         name, folder: $('org-folder').value.trim(),
+        ownerEmail: $('org-email').value.trim(),
       }),
     });
     const reply = await jsonp(`${SETTINGS_URL}?action=orgs` +
@@ -929,9 +931,17 @@ $('org-form').addEventListener('submit', async (e) => {
     }
     ADMIN_PW = $('org-admin').value;
     ORG_CHOICES = reply.orgs;
+    /* Say what was actually done with the folder, because that is the part
+       nobody can see from here: whether one was made, and whether the person
+       named can open it. The write is no-cors, so this comes from the
+       read-back — `made` is what the list says now. */
+    const owner = $('org-email').value.trim();
+    const where = made.folder ? ` Its projects go in ${made.folder}.` : '';
+    const shared = owner ? ` ${owner} can open it.` : '';
     $('org-done').hidden = false;
-    $('org-done').textContent = `${name} is ready. Its projects live in a ` +
-      'spreadsheet of its own.';
+    $('org-done').textContent =
+      `${name} is ready.${where}${shared} Its projects are listed in a ` +
+      'spreadsheet of its own, which nobody else can see.';
     renderOrgs();
     showGateStep('orgs');
   } catch (ex) {

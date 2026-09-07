@@ -41,10 +41,16 @@
     <p id="org-form-sub">A spreadsheet is created to hold its projects. It stays
       in your Drive and is shared with nobody.</p>
     <input type="text" id="org-name" placeholder="Organisation name" required>
-    <input type="text" id="org-folder" placeholder="Drive folder link (optional)">
-    <p class="hint">Open the folder in Drive and copy the address. New project
-      sheets are filed there, so whoever the folder is shared with can open
-      them.</p>
+    <input type="text" id="org-folder" placeholder="Drive folder link — leave blank to make one">
+    <p class="hint">Leave it blank and a folder named after the organisation is
+      created for it, so two clients cannot end up sharing one. Paste a link
+      only when its files already live somewhere. New project sheets are filed
+      there, so whoever that folder is shared with can open them.</p>
+    <input type="email" id="org-email" placeholder="Their Google account (optional)"
+           autocomplete="off">
+    <p class="hint">Given edit access to the folder, so they can open every
+      project in this organisation — including ones made later, since a file
+      inherits its folder.</p>
     <input type="password" id="org-admin" placeholder="Admin password"
            autocomplete="current-password" required>
     <div class="err" id="org-err"></div>

@@ -61,6 +61,9 @@
  *        SERVICE_ACCOUNT     the service account's email      (recommended)
  *        PROJECTS_FOLDER_ID  Drive folder for new sheets      (optional)
  *        ADMIN_PASSWORD      required to create projects      (optional)
+ *        ORGS_PARENT_FOLDER_ID  where each organisation's own folder is
+ *                            created — see "An organisation's own folder"
+ *                            (optional; without it, folders are pasted by hand)
  *   4. Deploy -> New deployment -> Web app
  *        Execute as:      Me
  *        Who has access:  Anyone
@@ -2192,6 +2195,181 @@ function _checkFolder(folderId) {
   }
 }
 
+/* ── Where the registries live ──────────────────────────────────────────────
+   Two folders, and they must not be the same one.
+
+     the DB folder        the root sheet and every organisation's registry.
+                          Shared with NOBODY. These files hold the data keys
+                          and password hashes for every project there is.
+     a project folder     one per organisation, shared with the people who
+                          work on that organisation's projects.
+
+   New registries used to be left wherever SpreadsheetApp.create puts them,
+   which is the top of My Drive — so they accumulated loose beside everything
+   else, and keeping the database separate was something you had to remember to
+   do by hand, every time, for a file you did not create.
+
+   They are filed beside the root sheet instead: whatever folder that is in is
+   the database folder, by definition. Nothing to configure, and moving the
+   root sheet moves where the next one goes. REGISTRY_FOLDER_ID overrides it if
+   you want them somewhere else.                                             */
+
+function _registryFolder() {
+  var named = _props().getProperty('REGISTRY_FOLDER_ID') || '';
+  if (named) {
+    try {
+      return DriveApp.getFolderById(named);
+    } catch (err) {
+      return null;        // reported by _registryFolderStatus, not thrown here
+    }
+  }
+  // Wherever the root sheet lives. It is the database, so its folder is the
+  // database folder.
+  try {
+    var parents = DriveApp.getFileById(_rootId()).getParents();
+    if (parents.hasNext()) return parents.next();
+  } catch (err) {
+    // No Drive access, or the root sheet is loose in My Drive. Either way
+    // there is nowhere in particular to put it.
+  }
+  return null;
+}
+
+/**
+ * Put a newly created registry in the database folder.
+ *
+ * Never fatal. A registry in the wrong folder still works perfectly — it is
+ * reached by id — so this is tidiness and, more importantly, containment. It
+ * says what it did either way.
+ */
+function _fileRegistry(spreadsheetId) {
+  var folder = _registryFolder();
+  if (!folder) return { filed: false, note: 'left in My Drive: the root sheet ' +
+                        'is not in a folder, so there is no database folder yet' };
+  try {
+    _moveIntoFolder(spreadsheetId, folder);
+    var shared = null;
+    try {
+      shared = folder.getEditors().length + folder.getViewers().length;
+    } catch (err) {
+      shared = null;
+    }
+    return {
+      filed: true, folder: folder.getName(), sharedWith: shared,
+      // The whole point of a separate folder is that nobody else is in it, so
+      // a number above zero is worth putting in front of somebody.
+      warning: shared ? 'WARNING: ' + folder.getName() + ' is shared with ' +
+        shared + ' other ' + (shared === 1 ? 'person' : 'people') +
+        ', and a file inherits its folder. They can now read this ' +
+        "organisation's project keys and password hashes. Move the registries " +
+        'to a folder only you can open.' : ''
+    };
+  } catch (err) {
+    return { filed: false, note: 'could not be filed into ' + folder.getName() +
+             ': ' + err };
+  }
+}
+
+/** The database folder, for the ping — a count, never who. */
+function _registryFolderStatus() {
+  var named = _props().getProperty('REGISTRY_FOLDER_ID') || '';
+  var folder = _registryFolder();
+  if (!folder) {
+    return { configured: Boolean(named), reachable: false,
+             note: named ? 'REGISTRY_FOLDER_ID cannot be opened'
+                         : 'the root sheet is not in a folder' };
+  }
+  var status = { configured: true, reachable: true, name: folder.getName(),
+                 fromRootSheet: !named };
+  try {
+    status.sharedWith = folder.getEditors().length + folder.getViewers().length;
+  } catch (err) {
+    status.sharedWith = null;
+  }
+  return status;
+}
+
+
+/* ── An organisation's own folder ───────────────────────────────────────────
+   Pasting a Drive link for every new organisation is a step that can be got
+   wrong — the wrong folder, a folder shared with the wrong people, or the
+   commonest one, the same folder as the last organisation, which quietly puts
+   two clients' sheets in front of each other.
+
+   So with ORGS_PARENT_FOLDER_ID set, the folder is MADE: one named for the
+   organisation, inside that parent. Nothing to paste and nothing to line up,
+   and two organisations cannot end up sharing a folder by accident.
+
+   A link may still be given, and then it wins — an organisation whose files
+   already live somewhere should keep living there.
+
+   ── SET IT UP ONCE ────────────────────────────────────────────────────────
+   Project Settings -> Script Properties:
+     ORGS_PARENT_FOLDER_ID   the folder to create organisation folders inside
+
+   The account this script runs as needs edit access to it, which is what lets
+   it create anything there at all.                                          */
+
+function _orgsParentFolder() {
+  var id = _props().getProperty('ORGS_PARENT_FOLDER_ID') || '';
+  if (!id) return null;
+  try {
+    return DriveApp.getFolderById(id);
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * The folder a new organisation's projects go in.
+ *
+ * An existing folder by that name inside the parent is REUSED rather than a
+ * second one made beside it. Drive is perfectly happy to hold two folders
+ * called "Acme", and nothing downstream could then tell you which one a sheet
+ * went into — so making the same organisation twice, or remaking one that was
+ * deleted from the registry, lands back in the folder that is already there.
+ */
+function _makeOrgFolder(name) {
+  var parent = _orgsParentFolder();
+  if (!parent) {
+    return { id: '', made: false,
+             note: 'no ORGS_PARENT_FOLDER_ID is set, so no folder was made. ' +
+                   'New projects will go to My Drive unless you give this ' +
+                   'organisation a folder link.' };
+  }
+  try {
+    var existing = parent.getFoldersByName(name);
+    if (existing.hasNext()) {
+      var found = existing.next();
+      return { id: found.getId(), made: false, name: found.getName(),
+               parent: parent.getName(),
+               note: 'a folder of that name was already there, so it was used ' +
+                     'rather than a second one made beside it' };
+    }
+    var folder = parent.createFolder(name);
+    return { id: folder.getId(), made: true, name: folder.getName(),
+             parent: parent.getName() };
+  } catch (err) {
+    // Almost always "the account this runs as cannot write here".
+    return { id: '', made: false,
+             note: 'could not make a folder in ' + parent.getName() + ': ' + err };
+  }
+}
+
+/** The parent folder, for the ping — so a wrong id is visible before it bites. */
+function _orgsParentStatus() {
+  var id = _props().getProperty('ORGS_PARENT_FOLDER_ID') || '';
+  if (!id) return { configured: false };
+  var folder = _orgsParentFolder();
+  if (!folder) {
+    return { configured: true, reachable: false,
+             error: 'ORGS_PARENT_FOLDER_ID cannot be opened. Check the id, and ' +
+                    'that the account this runs as has access to it.' };
+  }
+  return { configured: true, reachable: true, name: folder.getName() };
+}
+
+
 /**
  * Make an organisation: its own registry spreadsheet, its own folder.
  *
@@ -2214,15 +2392,49 @@ function _createOrg(body) {
                     'id from it.');
   }
   var folderName = '';
+  var folderMade = null;
   if (folderId) {
+    // A link was given, so it wins: an organisation whose files already live
+    // somewhere should keep living there.
     var checked = _checkFolder(folderId);
     if (!checked.ok) throw new Error(checked.error);
     folderName = checked.name;
+  } else {
+    // None given — make one named for the organisation.
+    folderMade = _makeOrgFolder(name);
+    folderId = folderMade.id;
+    folderName = folderMade.name || '';
+  }
+
+  /* Whoever runs this organisation gets edit access to its folder.
+     Without it the folder is a place they cannot open: every project sheet is
+     filed there, so the grant is what makes an organisation usable by the
+     people it belongs to. On the FOLDER rather than each sheet, so a project
+     made next month needs no second act — a file inherits its folder. */
+  var grantedTo = '';
+  var ownerEmail = String(body.ownerEmail || '').trim();
+  if (ownerEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ownerEmail)) {
+    throw new Error('that does not look like an email address: ' + ownerEmail);
+  }
+  if (ownerEmail && folderId) {
+    try {
+      DriveApp.getFolderById(folderId).addEditor(ownerEmail);
+      grantedTo = ownerEmail;
+    } catch (err) {
+      // The organisation is perfectly usable without this; say so rather than
+      // failing the whole thing over a share.
+      grantedTo = 'could not share the folder with ' + ownerEmail + ': ' + err;
+    }
+  } else if (ownerEmail) {
+    grantedTo = 'no folder to share: ' + ownerEmail + ' was not given access';
   }
 
   var orgId = _uniqueOrgId(_slugify(body.id || name));
   var registry = SpreadsheetApp.create('Registry — ' + name);
   var registryId = registry.getId();
+  // Into the database folder, beside the root sheet, before anything else —
+  // so it is never loose in My Drive even briefly.
+  var filedRegistry = _fileRegistry(registryId);
   // _registrySheet makes the Projects tab and its header, which is the one
   // place that knows what a registry looks like.
   _registrySheet(registryId);
@@ -2251,8 +2463,18 @@ function _createOrg(body) {
   return {
     org: orgId, name: name, registrySheetId: registryId,
     registryUrl: registry.getUrl(), folderId: folderId, folder: folderName,
-    note: 'the registry is in your Drive and is not shared with anyone. It ' +
-          'holds this organisation\'s project keys, so it must not be.'
+    // Whether a folder was made for it, reused, or could not be — so a
+    // half-configured parent is visible rather than silently doing nothing.
+    folderMade: folderMade,
+    // Who was let into the folder — '' when nobody was asked for, and a
+    // 'could not…' string when it did not work.
+    grantedTo: grantedTo,
+    // Where the registry went, and whether that folder is as private as it
+    // needs to be.
+    registryFiledIn: filedRegistry,
+    note: filedRegistry.warning ||
+      ('the registry is in your Drive and is not shared with anyone. It ' +
+       'holds this organisation\'s project keys, so it must not be.')
   };
 }
 
@@ -2658,6 +2880,10 @@ function doGet(e) {
         serviceAccountConfigured: Boolean(_serviceAccount()),
         adminPasswordConfigured: Boolean(_adminPassword()),
         projectsFolder: _projectsFolderStatus(),
+        // The other folder, and the one that must be shared with nobody.
+        registryFolder: _registryFolderStatus(),
+        // Where a new organisation's own folder gets made.
+        orgsParentFolder: _orgsParentStatus(),
         // Diagnostic only, and it needs the userinfo.email scope, which is not
         // granted by default — so it must never be allowed to fail the ping.
         runsAs: _effectiveUser(),
